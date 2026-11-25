@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::about;
-use crate::agent::{Agent, Sink, TurnEnd};
+use crate::agent::{Agent, Compaction, Sink, TurnEnd};
 use crate::attach::{self, Pending, Transcriber};
 use crate::backend::llama::Llama;
 use crate::backend::strata::Strata;
@@ -28,9 +28,9 @@ use agentlibre_common::paths::Paths;
 use crate::phase::{Observer, PhaseEvent};
 use agentlibre_common::programs;
 use crate::search::{self, Searcher};
-use crate::session::{Event, Session};
+use crate::i18n::repl as texts;
+use crate::session::{Event, Session, StopReason};
 use agentlibre_common::settings::{self, ServerFile, ServerKind, Settings, UserFile, function_name};
-use crate::status::compact_notice;
 use crate::stop::Stop;
 use agentlibre_common::style::Role;
 use crate::tools::ForgeEnv;
@@ -149,6 +149,29 @@ impl Text {
 }
 
 /// The `Event` of a written memory entry (AGL-047, D5).
+/// What to tell after `/compact`; a summary shows itself (D140).
+fn compact_notice(
+    result: Result<Compaction, Error>,
+    function: &Function,
+    lang: Lang,
+) -> Option<(String, Role)> {
+    match result {
+        Ok(Compaction::Done) => None,
+        Ok(Compaction::Nothing) => {
+            Some((tr!(lang, m::NOTHING_TO_COMPACT).to_string(), Role::Muted))
+        }
+        Ok(Compaction::Impossible { limit }) => Some((
+            tr!(lang, m::COMPACTION_FAILED, limit = limit),
+            Role::StatusFailure,
+        )),
+        Err(Error::Common(agentlibre_common::error::Error::Interrupted)) => Some((
+            texts::stopped(StopReason::Interrupted, function, lang),
+            Role::StatusPending,
+        )),
+        Err(error) => Some((error.message(lang), Role::StatusFailure)),
+    }
+}
+
 fn written(write: &Write) -> Event {
     Event::Memory {
         name: write.name.clone(),
@@ -1155,6 +1178,25 @@ fn model_file(model: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_compact_tells() {
+        let none = Path::new("/none");
+        let function = Function::load(&[none, none], "fixture-minimal").unwrap();
+        let notice = |result| compact_notice(result, &function, Lang::En);
+        assert_eq!(notice(Ok(Compaction::Done)), None);
+        assert_eq!(
+            notice(Ok(Compaction::Nothing)),
+            Some(("Nothing to compact.".into(), Role::Muted))
+        );
+        let (text, role) = notice(Ok(Compaction::Impossible { limit: 4096 })).unwrap();
+        assert!(text.starts_with("cannot compact: the history and max_compact_tokens (4096)"));
+        assert_eq!(role, Role::StatusFailure);
+        assert_eq!(
+            notice(Err(agentlibre_common::error::Error::Interrupted.into())),
+            Some(("interrupted".into(), Role::StatusPending))
+        );
+    }
 
     #[test]
     fn the_model_of_the_server_is_the_weights_or_the_config() {

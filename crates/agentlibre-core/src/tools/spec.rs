@@ -474,6 +474,132 @@ pub fn outcomes(name: &str) -> &'static [Outcome] {
 mod tests {
     use super::*;
 
+    fn call(id: &str, command: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: "bash".into(),
+            args: vec![
+                ("command".into(), Value::Text(command.into())),
+                ("timeout".into(), Value::Int(30)),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_hint_is_one_line_of_the_input() {
+        assert_eq!(call_summary(&call("c1", "ls\npwd")), "ls");
+        let edit = ToolCall {
+            id: "c1".into(),
+            name: "edit".into(),
+            args: vec![
+                ("path".into(), Value::Text("a.rs".into())),
+                ("old".into(), Value::Text("x".into())),
+                ("new".into(), Value::Text("y".into())),
+            ],
+        };
+        assert_eq!(call_summary(&edit), "a.rs");
+        let search = ToolCall {
+            id: "c1".into(),
+            name: "search".into(),
+            args: vec![
+                ("source".into(), Value::Text("web".into())),
+                ("query".into(), Value::Text("agentLIBRE".into())),
+            ],
+        };
+        assert_eq!(call_summary(&search), "web: agentLIBRE");
+        // A call whose input has no known line keeps its first text
+        // argument (D12).
+        let unknown = ToolCall {
+            id: "c1".into(),
+            name: "view".into(),
+            args: vec![("path".into(), Value::Text("/tmp/a.png".into()))],
+        };
+        assert_eq!(call_summary(&unknown), "/tmp/a.png");
+    }
+
+    #[test]
+    fn the_forge_and_the_memory_say_what_they_did() {
+        // AGL-068: the hint row under the gutter is the action, the entry
+        // and the action's detail.
+        let append = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![
+                ("action".into(), Value::Text("append".into())),
+                ("name".into(), Value::Text("agl-066".into())),
+                ("section".into(), Value::Text("Progress".into())),
+                ("text".into(), Value::Text("the bullet".into())),
+            ],
+        };
+        assert_eq!(call_summary(&append), "append agl-066 Progress");
+        let new = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![
+                ("action".into(), Value::Text("new".into())),
+                ("title".into(), Value::Text("My task".into())),
+            ],
+        };
+        assert_eq!(call_summary(&new), "new My task");
+        let status = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![
+                ("action".into(), Value::Text("status".into())),
+                ("name".into(), Value::Text("agl-066".into())),
+                ("state".into(), Value::Text("done".into())),
+            ],
+        };
+        assert_eq!(call_summary(&status), "status agl-066 done");
+        let rename = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![
+                ("action".into(), Value::Text("rename".into())),
+                ("name".into(), Value::Text("agl-066".into())),
+                ("new".into(), Value::Text("agl-067".into())),
+            ],
+        };
+        assert_eq!(call_summary(&rename), "rename agl-066 → agl-067");
+        let edit = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![
+                ("action".into(), Value::Text("edit".into())),
+                ("name".into(), Value::Text("agl-066".into())),
+                ("old".into(), Value::Text("a".into())),
+                ("new".into(), Value::Text("b".into())),
+            ],
+        };
+        assert_eq!(call_summary(&edit), "edit agl-066 “a” → “b”");
+        let list = ToolCall {
+            id: "c1".into(),
+            name: "forge".into(),
+            args: vec![("action".into(), Value::Text("list".into()))],
+        };
+        assert_eq!(call_summary(&list), "list");
+        let memory = ToolCall {
+            id: "c1".into(),
+            name: "memory".into(),
+            args: vec![
+                ("action".into(), Value::Text("add".into())),
+                ("title".into(), Value::Text("Build".into())),
+            ],
+        };
+        assert_eq!(call_summary(&memory), "add Build");
+        let memory_edit = ToolCall {
+            id: "c1".into(),
+            name: "memory".into(),
+            args: vec![
+                ("action".into(), Value::Text("edit".into())),
+                ("name".into(), Value::Text("build".into())),
+                ("old".into(), Value::Text("a".into())),
+                ("new".into(), Value::Text("b".into())),
+            ],
+        };
+        assert_eq!(call_summary(&memory_edit), "edit build");
+    }
+
     #[test]
     fn what_the_model_reads_names_no_task_and_no_decision() {
         // AGL-067, D5: the ids of the project's own records are not for the

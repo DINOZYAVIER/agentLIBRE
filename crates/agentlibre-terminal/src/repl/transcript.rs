@@ -22,6 +22,20 @@ use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use crate::tools::ToolResult;
 use agentlibre_common::tr;
+use agentlibre_proto as proto;
+
+/// The records of a session's events (AGL-066). The events are the core's
+/// until the surfaces hold the wire's types (AGL-130, step 6): they cross
+/// to the wire's here, where `records::group` takes them.
+pub(super) fn records_of(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Vec<Record> {
+    let events: Vec<proto::Event> = events.iter().cloned().map(crate::plane::wire::event).collect();
+    let transitions: Vec<proto::PhaseTime> = transitions
+        .iter()
+        .cloned()
+        .map(crate::plane::wire::phase_time)
+        .collect();
+    records::group(&events, &transitions, lang)
+}
 
 /// A phase's name, in the dock and on the rule of a step (D135; AGL-045).
 pub fn label(phase: &Phase, lang: Lang) -> String {
@@ -219,7 +233,7 @@ impl Presenter {
 
     /// `[cut off]` where an action hit its token limit (D154).
     pub fn show_cut_off(&self, cut: &CutOff) {
-        let line = crate::status::cut_off_line(cut, self.lang);
+        let line = crate::status::cut_off_line(&crate::plane::wire::cut_off(cut), self.lang);
         self.screen.print(&notice_block_lines(
             &self.theme,
             self.lang,
@@ -248,7 +262,7 @@ impl Presenter {
             &self.theme,
             self.lang,
             self.screen.columns(),
-            &records::memory_line(name, kind, self.lang),
+            &records::memory_line(name, crate::plane::wire::memory_kind(kind), self.lang),
             Role::Muted,
         );
         if let Some(text) = text {
@@ -318,7 +332,7 @@ impl Presenter {
     /// (AGL-066): compact by default, in full in the inspect mode.
     /// `transitions` carry the phases' times of the steps.
     pub fn replay(&self, events: &[Event], transitions: &[TransitionLine]) {
-        for record in records::group(events, transitions, self.lang) {
+        for record in records_of(events, transitions, self.lang) {
             match &record {
                 Record::User(message) => self.show_user(message),
                 Record::Wake { flow, text } => self.show_user(&format!("[{flow}] {text}")),
@@ -435,8 +449,8 @@ impl Presenter {
     /// blank that ends the block.
     fn card(
         &self,
-        call: &ToolCall,
-        result: Option<&ToolResult>,
+        call: &proto::ToolCall,
+        result: Option<&records::ToolResult>,
         hint: &str,
         items: &[String],
     ) -> Vec<String> {
@@ -681,9 +695,14 @@ impl Presenter {
             call.name,
             texts::duration(self.tool_time.as_secs())
         ));
-        let hint = records::call_hint(call);
+        let hint = crate::tools::spec::call_summary(call);
+        let call = crate::plane::wire::tool_call(call.clone());
+        let result = records::ToolResult {
+            outcome: crate::plane::wire::outcome(result.outcome),
+            content: result.content.clone(),
+        };
         self.screen
-            .print(&self.card(call, Some(result), &hint, &items));
+            .print(&self.card(&call, Some(&result), &hint, &items));
         self.prefill = None;
     }
 
@@ -1001,9 +1020,15 @@ mod tests {
 
     /// The compact card of `call` with its `items` (D1, D2, D6).
     fn show_card(presenter: &Presenter, call: &ToolCall, result: &ToolResult, items: &[String]) {
+        let hint = crate::tools::spec::call_summary(call);
+        let result = records::ToolResult {
+            outcome: crate::plane::wire::outcome(result.outcome),
+            content: result.content.clone(),
+        };
+        let call = crate::plane::wire::tool_call(call.clone());
         presenter
             .screen
-            .print(&presenter.card(call, Some(result), &records::call_hint(call), items));
+            .print(&presenter.card(&call, Some(&result), &hint, items));
     }
 
     #[test]

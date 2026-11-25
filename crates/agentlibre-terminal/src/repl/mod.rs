@@ -1493,7 +1493,10 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             Next::Functions => {
                 let list = stores
                     .entries()
-                    .map(|entries| crate::function::catalog::lines(&entries, lang).join("\n"));
+                    .map(|entries| {
+                        let entries: Vec<_> = entries.into_iter().map(crate::plane::wire::function_entry).collect();
+                        crate::records::function_lines(&entries, lang).join("\n")
+                    });
                 match list {
                     Ok(list) => {
                         presenter.show_notice(&list, Role::Muted);
@@ -1745,13 +1748,9 @@ pub fn run(setup: Setup) -> Result<End, Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
-    use crate::agent::Compaction;
-    use crate::status::compact_notice;
-    use crate::function::Function;
 
     #[derive(Clone, Default)]
     struct Sink(Arc<Mutex<Vec<u8>>>);
@@ -2797,25 +2796,6 @@ mod tests {
         f.inner().running = false;
         f.input.key(Key::Ctrl('d'));
         assert!(f.inner().requests.quit());
-    }
-
-    #[test]
-    fn what_compact_tells() {
-        let none = Path::new("/none");
-        let function = Function::load(&[none, none], "fixture-minimal").unwrap();
-        let notice = |result| compact_notice(result, &function, Lang::En);
-        assert_eq!(notice(Ok(Compaction::Done)), None);
-        assert_eq!(
-            notice(Ok(Compaction::Nothing)),
-            Some(("Nothing to compact.".into(), Role::Muted))
-        );
-        let (text, role) = notice(Ok(Compaction::Impossible { limit: 4096 })).unwrap();
-        assert!(text.starts_with("cannot compact: the history and max_compact_tokens (4096)"));
-        assert_eq!(role, Role::StatusFailure);
-        assert_eq!(
-            notice(Err(agentlibre_common::error::Error::Interrupted.into())),
-            Some(("interrupted".into(), Role::StatusPending))
-        );
     }
 
     #[test]

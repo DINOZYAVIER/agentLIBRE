@@ -5,16 +5,23 @@
 
 use std::time::Duration;
 
-use crate::action::{Outcome, Value};
-use crate::backend::ToolCall;
+use agentlibre_proto::{
+    Event, ForgeKind, FunctionEntry, FunctionSource, Media, MediaKind, MemoryKind,
+    Outcome, PhaseTime, ToolCall, Value,
+};
+
 use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
-use crate::media::{Kind as MediaKind, Media};
-use agentlibre_forge::memory::Kind as MemoryKind;
-use crate::session::{Event, ForgeKind, TransitionLine};
 use agentlibre_common::style::Role;
-use crate::tools::ToolResult;
 use agentlibre_common::tr;
+
+/// What a call gave, as the records hold it (AGL-130, D9): the outcome and
+/// the content of its `result` event.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToolResult {
+    pub outcome: Outcome,
+    pub content: String,
+}
 
 /// A phase of a step and its time, in the order they were spent (D2).
 #[derive(Clone, Debug, PartialEq)]
@@ -159,7 +166,7 @@ pub fn forge_line(name: &str, kind: ForgeKind, section: Option<&str>, lang: Lang
 
 /// The line of a medium the session took (AGL-043 F17).
 pub fn media_line(medium: &Media, lang: Lang) -> String {
-    let head = format!("{} {}", medium.placeholder(), medium.name);
+    let head = format!("[{}#{}] {}", medium.kind.label(), medium.number, medium.name);
     match (&medium.kind, &medium.transcript) {
         (MediaKind::Audio, Some(transcript)) => format!("{head} — “{transcript}”"),
         (MediaKind::Video, _) => tr!(
@@ -172,6 +179,67 @@ pub fn media_line(medium: &Media, lang: Lang) -> String {
     }
 }
 
+/// A Function's source in the language (AGL-130, D10): the word `Source::label`
+/// of the core says for it.
+fn source_label(source: FunctionSource, lang: Lang) -> &'static str {
+    match source {
+        FunctionSource::Plane => tr!(lang, m::FUNCTION_SOURCE_PLANE),
+        FunctionSource::Workspace => tr!(lang, m::FUNCTION_SOURCE_WORKSPACE),
+        FunctionSource::User => tr!(lang, m::FUNCTION_SOURCE_USER),
+        FunctionSource::BuiltIn => tr!(lang, m::FUNCTION_SOURCE_BUILTIN),
+    }
+}
+
+/// The Functions of the wire as lines (AGL-036, D3; AGL-130, D10): the
+/// current one marked, the columns aligned. It writes what
+/// `function::catalog::lines` writes of the same entries; the kind is the
+/// text of the wire.
+pub fn function_lines(entries: &[FunctionEntry], lang: Lang) -> Vec<String> {
+    let name_width = entries.iter().map(|e| e.name.chars().count()).max().unwrap_or(0);
+    let source_width = entries
+        .iter()
+        .map(|e| source_label(e.source, lang).chars().count())
+        .max()
+        .unwrap_or(0);
+    let no_model = tr!(lang, m::FUNCTION_NO_MODEL);
+    let model_width = entries
+        .iter()
+        .filter(|e| e.error.is_none())
+        .map(|e| e.model.as_deref().unwrap_or(no_model).chars().count())
+        .max()
+        .unwrap_or(0);
+    entries
+        .iter()
+        .map(|entry| {
+            let mark = if entry.current { '*' } else { ' ' };
+            let mut line = format!(
+                "{mark} {:name_width$}  {:source_width$}  ",
+                entry.name,
+                source_label(entry.source, lang),
+            );
+            match &entry.error {
+                Some(error) => line.push_str(error),
+                None => {
+                    line.push_str(&format!("{:6}  ", entry.kind));
+                    let model = entry.model.as_deref().unwrap_or(no_model);
+                    match &entry.description {
+                        Some(description) => {
+                            line.push_str(&format!("{model:model_width$}  {description}"));
+                        }
+                        None => line.push_str(model),
+                    }
+                }
+            }
+            if !entry.shadows.is_empty() {
+                let hidden: Vec<&str> = entry.shadows.iter().map(|s| source_label(*s, lang)).collect();
+                line.push(' ');
+                line.push_str(&tr!(lang, m::FUNCTION_SHADOWS, sources = hidden.join(", ")));
+            }
+            line.trim_end().to_owned()
+        })
+        .collect()
+}
+
 /// The line where the memory was written (AGL-006, M28).
 pub fn memory_line(name: &str, kind: MemoryKind, lang: Lang) -> String {
     tr!(lang, m::MEMORY_EVENT, change = format!("{}{name}", kind.sign()))
@@ -181,16 +249,9 @@ fn notice(line: String, role: Role, detail: Option<String>) -> Record {
     Record::Notice { line, role, detail }
 }
 
-/// One line of the input (D6): the table of built-in tools says how
-/// each tool sums up (AGL-121, D15); for a tool of a Function, the
-/// first text argument.
-pub fn call_hint(call: &ToolCall) -> String {
-    crate::tools::spec::call_summary(call)
-}
-
 /// What a call sent, in full (AGL-095, D5): the command, the edit with its
 /// lines, the search's query, every argument of a forge or a memory call.
-/// The compact form of it is `call_hint`.
+/// The compact form of it is the call's `summary` on the wire.
 pub fn call_input(call: &ToolCall) -> String {
     let text = |name: &str| call.text(name).unwrap_or_default();
     if call.name == "edit" {
@@ -255,7 +316,7 @@ fn phase_label(name: &str, tool: &str, lang: Lang) -> Option<String> {
 fn step_phases(
     turn: usize,
     step: usize,
-    transitions: &[TransitionLine],
+    transitions: &[PhaseTime],
     tool: &str,
     lang: Lang,
 ) -> (Vec<PhaseSpan>, Option<Duration>) {
@@ -283,7 +344,7 @@ fn step_phases(
 /// The events of a session into the records (AGL-066). `transitions` are
 /// the phases' times of the steps, by their turn and step; the steps are
 /// the calls, 1-based within their turn, and the turns the user messages.
-pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Vec<Record> {
+pub fn group(events: &[Event], transitions: &[PhaseTime], lang: Lang) -> Vec<Record> {
     let mut records = Vec::new();
     let mut turn = 0;
     let mut step = 0;
@@ -316,13 +377,15 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
                 // The thinking goes with the record of its step (D19).
                 pending_thinking = Some(text.clone());
             }
-            Event::Call { text, call } => {
+            Event::Call { text, call, summary } => {
                 step += 1;
                 let (phases, time) = step_phases(turn, step, transitions, &call.name, lang);
                 records.push(Record::Tool {
                     call: call.clone(),
                     result: None,
-                    hint: call_hint(call),
+                    // The daemon's table of tools sums the call up (AGL-121,
+                    // D52); an event without it shows an empty hint (AGL-130, D9).
+                    hint: summary.clone().unwrap_or_default(),
                     phases,
                     time,
                     thinking: pending_thinking.take(),
@@ -402,7 +465,6 @@ pub fn group(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::Value;
 
     fn call(id: &str, command: &str) -> ToolCall {
         ToolCall {
@@ -415,8 +477,8 @@ mod tests {
         }
     }
 
-    fn line(turn: usize, step: usize, from: &str, ms: u64) -> TransitionLine {
-        TransitionLine {
+    fn line(turn: usize, step: usize, from: &str, ms: u64) -> PhaseTime {
+        PhaseTime {
             turn,
             step,
             from: from.into(),
@@ -437,6 +499,7 @@ mod tests {
             Event::Call {
                 text: Some("I will run it.".into()),
                 call: call("c1", "cargo test"),
+                summary: Some("cargo test".into()),
             },
             Event::Result {
                 id: "c1".into(),
@@ -446,6 +509,7 @@ mod tests {
             Event::Call {
                 text: None,
                 call: call("c2", "ls"),
+                summary: Some("ls".into()),
             },
             Event::Result {
                 id: "c2".into(),
@@ -508,6 +572,7 @@ mod tests {
             Event::Call {
                 text: None,
                 call: call("c1", "ls"),
+                summary: Some("ls".into()),
             },
         ];
         let records = group(&events, &[], Lang::En);
@@ -532,6 +597,7 @@ mod tests {
             Event::Call {
                 text: None,
                 call: call("c1", "ls"),
+                summary: Some("ls".into()),
             },
             Event::Result {
                 id: "c1".into(),
@@ -541,6 +607,7 @@ mod tests {
             Event::Call {
                 text: None,
                 call: call("c2", "ls"),
+                summary: Some("ls".into()),
             },
             Event::Result {
                 id: "c2".into(),
@@ -551,6 +618,7 @@ mod tests {
             Event::Call {
                 text: None,
                 call: call("c3", "ls"),
+                summary: Some("ls".into()),
             },
             Event::Result {
                 id: "c3".into(),
@@ -609,121 +677,99 @@ mod tests {
     }
 
     #[test]
-    fn the_hint_is_one_line_of_the_input() {
-        assert_eq!(call_hint(&call("c1", "ls\npwd")), "ls");
-        let edit = ToolCall {
+    fn a_forge_or_a_memory_call_names_its_action() {
+        // AGL-068: the action of the call is on the tool's line.
+        let call_of = |name: &str, action: &str| ToolCall {
             id: "c1".into(),
-            name: "edit".into(),
-            args: vec![
-                ("path".into(), Value::Text("a.rs".into())),
-                ("old".into(), Value::Text("x".into())),
-                ("new".into(), Value::Text("y".into())),
-            ],
+            name: name.into(),
+            args: vec![("action".into(), Value::Text(action.into()))],
         };
-        assert_eq!(call_hint(&edit), "a.rs");
-        let search = ToolCall {
-            id: "c1".into(),
-            name: "search".into(),
-            args: vec![
-                ("source".into(), Value::Text("web".into())),
-                ("query".into(), Value::Text("agentLIBRE".into())),
-            ],
-        };
-        assert_eq!(call_hint(&search), "web: agentLIBRE");
-        // A call whose input has no known line keeps its first text
-        // argument (D12).
-        let unknown = ToolCall {
-            id: "c1".into(),
-            name: "view".into(),
-            args: vec![("path".into(), Value::Text("/tmp/a.png".into()))],
-        };
-        assert_eq!(call_hint(&unknown), "/tmp/a.png");
+        assert_eq!(call_action(&call_of("forge", "append")), Some("append".to_owned()));
+        assert_eq!(call_action(&call_of("memory", "add")), Some("add".to_owned()));
+        assert_eq!(call_action(&call("c1", "ls")), None);
     }
 
     #[test]
-    fn the_forge_and_the_memory_say_what_they_did() {
-        // AGL-068: the hint row under the gutter is the action, the entry
-        // and the action's detail.
-        let append = ToolCall {
-            id: "c1".into(),
-            name: "forge".into(),
-            args: vec![
-                ("action".into(), Value::Text("append".into())),
-                ("name".into(), Value::Text("agl-066".into())),
-                ("section".into(), Value::Text("Progress".into())),
-                ("text".into(), Value::Text("the bullet".into())),
-            ],
+    fn the_hint_of_a_step_is_its_summary_on_the_wire() {
+        // AGL-130, D9: a surface draws the summary the daemon sent; an
+        // event without one shows an empty hint.
+        let events = [
+            Event::Call {
+                text: None,
+                call: call("c1", "ls\npwd"),
+                summary: Some("ls".into()),
+            },
+            Event::Call {
+                text: None,
+                call: call("c2", "pwd"),
+                summary: None,
+            },
+        ];
+        let hints: Vec<String> = group(&events, &[], Lang::En)
+            .into_iter()
+            .filter_map(|record| match record {
+                Record::Tool { hint, .. } => Some(hint),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hints, ["ls", ""]);
+    }
+
+    /// The Functions of the list, as the core and as the wire have them.
+    fn entries() -> (Vec<crate::function::catalog::Entry>, Vec<FunctionEntry>) {
+        use crate::function::catalog::{Entry, Source};
+        use agentlibre_common::settings::ServerKind;
+        let make = || {
+            vec![
+                Entry {
+                    name: "minimal".into(),
+                    source: Source::BuiltIn,
+                    shadows: vec![Source::User, Source::Workspace],
+                    kind: ServerKind::Llama,
+                    model: Some("m.gguf".into()),
+                    description: Some("the smallest".into()),
+                    error: None,
+                    current: true,
+                },
+                Entry {
+                    name: "my-own-function".into(),
+                    source: Source::Plane,
+                    shadows: Vec::new(),
+                    kind: ServerKind::Llama,
+                    model: None,
+                    description: None,
+                    error: None,
+                    current: false,
+                },
+                Entry {
+                    name: "broken".into(),
+                    source: Source::Workspace,
+                    shadows: Vec::new(),
+                    kind: ServerKind::Llama,
+                    model: None,
+                    description: None,
+                    error: Some("it does not load".into()),
+                    current: false,
+                },
+            ]
         };
-        assert_eq!(call_hint(&append), "append agl-066 Progress");
-        assert_eq!(call_action(&append), Some("append".to_owned()));
-        let new = ToolCall {
-            id: "c1".into(),
-            name: "forge".into(),
-            args: vec![
-                ("action".into(), Value::Text("new".into())),
-                ("title".into(), Value::Text("My task".into())),
-            ],
-        };
-        assert_eq!(call_hint(&new), "new My task");
-        let status = ToolCall {
-            id: "c1".into(),
-            name: "forge".into(),
-            args: vec![
-                ("action".into(), Value::Text("status".into())),
-                ("name".into(), Value::Text("agl-066".into())),
-                ("state".into(), Value::Text("done".into())),
-            ],
-        };
-        assert_eq!(call_hint(&status), "status agl-066 done");
-        let rename = ToolCall {
-            id: "c1".into(),
-            name: "forge".into(),
-            args: vec![
-                ("action".into(), Value::Text("rename".into())),
-                ("name".into(), Value::Text("agl-066".into())),
-                ("new".into(), Value::Text("agl-067".into())),
-            ],
-        };
-        assert_eq!(call_hint(&rename), "rename agl-066 → agl-067");
-        let edit = ToolCall {
-            id: "c1".into(),
-            name: "forge".into(),
-            args: vec![
-                ("action".into(), Value::Text("edit".into())),
-                ("name".into(), Value::Text("agl-066".into())),
-                ("old".into(), Value::Text("a".into())),
-                ("new".into(), Value::Text("b".into())),
-            ],
-        };
-        assert_eq!(call_hint(&edit), "edit agl-066 “a” → “b”");
-        let list = ToolCall {
-            id: "c1".into(),
-            name: "forge".into(),
-            args: vec![("action".into(), Value::Text("list".into()))],
-        };
-        assert_eq!(call_hint(&list), "list");
-        let memory = ToolCall {
-            id: "c1".into(),
-            name: "memory".into(),
-            args: vec![
-                ("action".into(), Value::Text("add".into())),
-                ("title".into(), Value::Text("Build".into())),
-            ],
-        };
-        assert_eq!(call_hint(&memory), "add Build");
-        assert_eq!(call_action(&memory), Some("add".to_owned()));
-        let memory_edit = ToolCall {
-            id: "c1".into(),
-            name: "memory".into(),
-            args: vec![
-                ("action".into(), Value::Text("edit".into())),
-                ("name".into(), Value::Text("build".into())),
-                ("old".into(), Value::Text("a".into())),
-                ("new".into(), Value::Text("b".into())),
-            ],
-        };
-        assert_eq!(call_hint(&memory_edit), "edit build");
-        assert_eq!(call_action(&call("c1", "ls")), None);
+        (
+            make(),
+            make().into_iter().map(crate::plane::wire::function_entry).collect(),
+        )
+    }
+
+    #[test]
+    fn the_functions_of_the_wire_are_listed_as_the_catalog_lists_them() {
+        // AGL-130, D10: the same lines in every language.
+        let (core, wire) = entries();
+        for lang in [Lang::En, Lang::Uk] {
+            assert_eq!(
+                function_lines(&wire, lang),
+                crate::function::catalog::lines(&core, lang)
+            );
+        }
+        assert!(function_lines(&wire, Lang::En)[0].starts_with("* minimal"));
     }
 
     #[test]
@@ -736,6 +782,7 @@ mod tests {
             Event::Call {
                 text: None,
                 call: call("c1", "ls"),
+                summary: Some("ls".into()),
             },
             Event::Result {
                 id: "c1".into(),
@@ -746,6 +793,7 @@ mod tests {
             Event::Call {
                 text: None,
                 call: call("c2", "pwd"),
+                summary: Some("pwd".into()),
             },
             Event::Result {
                 id: "c2".into(),

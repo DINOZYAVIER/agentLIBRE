@@ -113,14 +113,14 @@ impl StderrReport {
     }
 
     pub fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
-        eprintln!("{}", crate::records::memory_line(name, kind, self.lang));
+        eprintln!("{}", crate::records::memory_line(name, crate::plane::wire::memory_kind(kind), self.lang));
         if let Some(text) = text {
             eprintln!("{text}");
         }
     }
 
     fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
-        eprintln!("{}", crate::records::forge_line(name, kind, section, self.lang));
+        eprintln!("{}", crate::records::forge_line(name, crate::plane::wire::forge_kind(kind), section, self.lang));
     }
 
     fn compacted(&mut self) {
@@ -128,7 +128,7 @@ impl StderrReport {
     }
 
     fn cut_off(&mut self, cut: &CutOff) {
-        eprintln!("{}", crate::status::cut_off_line(cut, self.lang));
+        eprintln!("{}", crate::status::cut_off_line(&crate::plane::wire::cut_off(cut), self.lang));
     }
 
     fn stirred(&mut self, attempt: u32, _max: u32, error: &str) {

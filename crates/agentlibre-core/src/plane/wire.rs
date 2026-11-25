@@ -482,6 +482,29 @@ pub fn attached_of(attached: wire::Attached) -> Option<Pending> {
     })
 }
 
+/// A call on the wire.
+pub fn tool_call(call: ToolCall) -> wire::ToolCall {
+    wire::ToolCall {
+        id: call.id,
+        name: call.name,
+        args: call
+            .args
+            .into_iter()
+            .map(|(name, value)| (name, self::value(value)))
+            .collect(),
+    }
+}
+
+/// A cut-off on the wire.
+pub fn cut_off(cut: &CutOff) -> wire::CutOff {
+    wire::CutOff {
+        limit: cut.limit,
+        thinking: cut.thinking,
+        discarded: cut.discarded,
+        call: cut.call,
+    }
+}
+
 fn value(value: Value) -> wire::Value {
     match value {
         Value::Text(text) => wire::Value::Text(text),
@@ -496,7 +519,7 @@ fn value_of(value: wire::Value) -> Value {
     }
 }
 
-fn outcome(outcome: Outcome) -> wire::Outcome {
+pub fn outcome(outcome: Outcome) -> wire::Outcome {
     match outcome {
         Outcome::Ok => wire::Outcome::Ok,
         Outcome::Fail => wire::Outcome::Fail,
@@ -534,7 +557,7 @@ pub fn stop_reason_of(reason: wire::StopReason) -> StopReason {
     }
 }
 
-fn forge_kind(kind: ForgeKind) -> wire::ForgeKind {
+pub fn forge_kind(kind: ForgeKind) -> wire::ForgeKind {
     match kind {
         ForgeKind::Created => wire::ForgeKind::Created,
         ForgeKind::Edited => wire::ForgeKind::Edited,
@@ -556,7 +579,7 @@ fn forge_kind_of(kind: wire::ForgeKind) -> ForgeKind {
     }
 }
 
-fn memory_kind(kind: MemoryKind) -> wire::MemoryKind {
+pub fn memory_kind(kind: MemoryKind) -> wire::MemoryKind {
     match kind {
         MemoryKind::Added => wire::MemoryKind::Added,
         MemoryKind::Edited => wire::MemoryKind::Edited,

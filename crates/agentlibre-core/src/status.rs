@@ -3,14 +3,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::agent::Compaction;
 use agentlibre_common::reasoning::ReasoningLevel;
-use crate::error::Error;
-use crate::function::Function;
+use agentlibre_proto::CutOff;
+
 use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
-use crate::session::{CutOff, StopReason};
-use agentlibre_common::style::Role;
 use agentlibre_common::tr;
 
 /// The line of a cut-off, in the transcript and on stderr (D154;
@@ -182,30 +179,6 @@ pub fn notice_parts(line: &str, lang: Lang) -> Option<(String, String)> {
     let (label, body) = inner.split_once(": ")?;
     Some((label.to_owned(), body.to_owned()))
 }
-
-/// What to tell after `/compact`; a summary shows itself (D140).
-pub fn compact_notice(
-    result: Result<Compaction, Error>,
-    function: &Function,
-    lang: Lang,
-) -> Option<(String, Role)> {
-    match result {
-        Ok(Compaction::Done) => None,
-        Ok(Compaction::Nothing) => {
-            Some((tr!(lang, m::NOTHING_TO_COMPACT).to_string(), Role::Muted))
-        }
-        Ok(Compaction::Impossible { limit }) => Some((
-            tr!(lang, m::COMPACTION_FAILED, limit = limit),
-            Role::StatusFailure,
-        )),
-        Err(Error::Common(agentlibre_common::error::Error::Interrupted)) => Some((
-            texts::stopped(StopReason::Interrupted, function, lang),
-            Role::StatusPending,
-        )),
-        Err(error) => Some((error.message(lang), Role::StatusFailure)),
-    }
-}
-
 
 #[cfg(test)]
 mod notice_tests {

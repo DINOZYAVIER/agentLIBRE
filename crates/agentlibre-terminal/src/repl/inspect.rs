@@ -17,7 +17,7 @@ use super::dock::{Dock, Layout};
 use super::term::{self, Key};
 use super::text::{clean, hard_wrap, truncate};
 use super::ModeKeys;
-use crate::backend::ToolCall;
+use agentlibre_proto::ToolCall;
 use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::records::{self, BlockKind, Record};
@@ -25,7 +25,7 @@ use crate::session::{Event, TransitionLine};
 use agentlibre_common::settings::Detail;
 use agentlibre_common::style::Role;
 use crate::theme::Theme;
-use crate::tools::ToolResult;
+use crate::records::ToolResult;
 use agentlibre_common::tr;
 
 /// The rows the screen keeps for the blank one and the hint (D8).
@@ -68,7 +68,7 @@ pub struct Inspect {
 
 impl Inspect {
     pub fn new(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Inspect {
-        let records = records::group(events, transitions, lang);
+        let records = super::transcript::records_of(events, transitions, lang);
         let selection = records.len().saturating_sub(1);
         let block = records
             .get(selection)
@@ -157,7 +157,7 @@ impl Inspect {
     /// the session's file only appends — while the follow goes after the
     /// new tail.
     pub fn reload(&mut self, events: &[Event], transitions: &[TransitionLine], lang: Lang) {
-        self.records = records::group(events, transitions, lang);
+        self.records = super::transcript::records_of(events, transitions, lang);
         if self.follow {
             self.go_tail();
             return;
@@ -732,6 +732,7 @@ fn draw(
 mod tests {
     use super::*;
     use crate::action::{Outcome, Value};
+    use crate::backend::ToolCall;
 
     fn call(id: &str, command: &str) -> ToolCall {
         ToolCall {
