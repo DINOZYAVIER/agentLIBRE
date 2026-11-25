@@ -81,7 +81,11 @@ impl Daemon {
             if let Some(entry) = id.as_ref().and_then(|id| state.sessions.get_mut(id)) {
                 entry.holders.insert(client);
                 entry.subscribers.insert(client);
-                return Ok(entry.opened.clone());
+                // It was there before this client, whoever made it.
+                return Ok(proto::Opened {
+                    resumed: true,
+                    ..entry.opened.clone()
+                });
             }
         }
         let (human, say) = {
@@ -507,6 +511,7 @@ mod tests {
             panic!("not attached")
         };
         assert_eq!(again.session.id, id);
+        assert!(again.resumed, "it was there before");
         let Reply::Sessions { sessions } = first.ask(&Request::Sessions) else {
             panic!()
         };
