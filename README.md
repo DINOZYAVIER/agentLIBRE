@@ -34,7 +34,7 @@ You can change the Function in your workspace-specific or global `settings.nix` 
 
 ### Inference
 
-agl uses HTTP to connect to an inference engine, whether it's llama.cpp or Strata. If nothing answers at the address, agl starts a new server itself, with the arguments of the Function. It also closes the server that agl started by itself when you close the REPL-chat.
+agl uses HTTP to connect to an inference engine, whether it's llama.cpp or Strata. If nothing answers at the address, agl starts a new server itself, with the arguments of the Function. The server that agl started by itself closes once no loaded session uses it: a session that nobody holds is unloaded after 15 minutes with nothing to do (`session_idle`).
 
 In the case of llama.cpp, agl builds a grammar from the state the agent is in and sends it with the request. It helps ensure that the model does what the state allows. Tool calls are more likely to be valid this way.
 
