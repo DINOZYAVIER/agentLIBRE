@@ -12,7 +12,7 @@ use super::reading::{MIN_TOKENS_OF_A_SPEED, Reading};
 use crate::records::{self, Record, ToolResult};
 use super::text::StreamWrap;
 use agentlibre_client::Surface;
-use crate::i18n::repl as texts;
+use agentlibre_surface::words as texts;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::settings::{Detail, ReplSettings};
 use agentlibre_common::style::Role;
@@ -219,7 +219,7 @@ impl Presenter {
 
     /// `[cut off]` where an action hit its token limit (D154).
     pub fn show_cut_off(&self, cut: &CutOff) {
-        let line = crate::status::cut_off_line(cut, self.lang);
+        let line = agentlibre_surface::words::cut_off_line(cut, self.lang);
         self.screen.print(&notice_block_lines(
             &self.theme,
             self.lang,
@@ -236,7 +236,7 @@ impl Presenter {
             &self.theme,
             self.lang,
             self.screen.columns(),
-            &crate::status::stir_line(attempt, error, self.lang),
+            &agentlibre_surface::words::stir_line(attempt, error, self.lang),
             Role::Muted,
         ));
     }

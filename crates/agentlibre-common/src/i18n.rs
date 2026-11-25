@@ -1485,6 +1485,14 @@ Forge (сховище артефактів робочої області, agentL
         uk: "Видалити запис пам'яті {name}? [y/N]",
     };
 
+    /// A removal with no terminal to ask on and no `--yes` (AGL-060, D3, D7):
+    /// the forge's error and the stdin session's refusal say it alike
+    /// (AGL-127, D8).
+    pub const REMOVE_NEEDS_YES: Msg = Msg {
+        en: "{name} not removed: there is no terminal to ask on; add --yes",
+        uk: "{name} не видалено: немає термінала, щоб спитати; додай --yes",
+    };
+
     /// A removal the human said no to (AGL-060).
     pub const MEMORY_NOT_REMOVED: Msg = Msg {
         en: "not removed: {name}",

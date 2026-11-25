@@ -127,11 +127,11 @@ impl StderrReport {
     }
 
     fn cut_off(&mut self, cut: &CutOff) {
-        eprintln!("{}", crate::status::cut_off_line(cut, self.lang));
+        eprintln!("{}", agentlibre_surface::words::cut_off_line(cut, self.lang));
     }
 
     fn stirred(&mut self, attempt: u32, _max: u32, error: &str) {
-        eprintln!("{}", crate::status::stir_line(attempt, error, self.lang));
+        eprintln!("{}", agentlibre_surface::words::stir_line(attempt, error, self.lang));
     }
 }
 

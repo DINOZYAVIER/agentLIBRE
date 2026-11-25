@@ -39,16 +39,16 @@ use agentlibre_common::media::{Kind, Pending, Source};
 use agentlibre_common::reasoning::ReasoningLevel;
 pub use functions::Functions;
 use agentlibre_common::paths::Paths;
-use crate::cli::args::{MemoryAction, look_of, memory_action};
+use agentlibre_surface::commands::{Memory, look_of, memory};
 use agentlibre_common::tty::is_yes;
 use crate::whisper;
 use crate::error::Error;
 use crate::error::CoreError;
-use crate::i18n::repl as texts;
+use agentlibre_surface::words as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::interrupt;
 use agentlibre_surface::clipboard::{self, Clip};
-use crate::status::{
+use agentlibre_surface::words::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
 use agentlibre_common::style::Role;
@@ -222,7 +222,7 @@ enum Request {
     Rename(String),
     /// `/memory`, its line and action, for the main thread to run
     /// (AGL-060).
-    Memory(String, MemoryAction),
+    Memory(String, Memory),
     /// `/compact`.
     Compact,
 }
@@ -270,7 +270,7 @@ impl Requests {
     }
 
     #[cfg(test)]
-    fn memory(&self) -> Option<(String, MemoryAction)> {
+    fn memory(&self) -> Option<(String, Memory)> {
         self.0.iter().find_map(|request| match request {
             Request::Memory(line, action) => Some((line.clone(), action.clone())),
             _ => None,
@@ -405,7 +405,7 @@ impl Input {
         let question = self.control.lock().question.take();
         if let Some(question) = question {
             if is_yes(&message) {
-                let action = MemoryAction::Remove {
+                let action = Memory::Remove {
                     name: question.name,
                     yes: true,
                 };
@@ -584,7 +584,7 @@ impl Input {
             // wait; not while a turn runs, when the model can be writing it.
             "/memory" => {
                 let words = trimmed.split_whitespace().skip(1).map(str::to_owned);
-                let Ok(action) = memory_action(words) else {
+                let Ok(action) = memory(words) else {
                     self.notice(tr!(self.lang, m::MEMORY_USAGE), Notice::Usage);
                     return false;
                 };
@@ -1008,7 +1008,7 @@ enum Next {
     /// `/rename`: the name asked for (AGL-062).
     Rename(String),
     /// `/memory`: its line and action (AGL-060).
-    Memory(String, MemoryAction),
+    Memory(String, Memory),
     /// `/function` (AGL-036, D9).
     Functions,
     /// `/function <name>` (AGL-036, D4).
@@ -1185,7 +1185,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         plane: opened.session.plane.clone(),
         server: opened.server_url.clone(),
     };
-    let commands: Vec<MenuItem> = crate::cli::commands::SLASH
+    let commands: Vec<MenuItem> = agentlibre_surface::commands::SLASH
         .iter()
         .map(|cmd| MenuItem {
             name: cmd.name,
@@ -1605,7 +1605,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             }
             // Without `--yes`, the question: the removal comes back with the
             // answer, and the record with it (AGL-060, D7).
-            Next::Memory(line, MemoryAction::Remove { name, yes: false }) => {
+            Next::Memory(line, Memory::Remove { name, yes: false }) => {
                 // The entry must be there before the question (AGL-060, D7).
                 let found = match ask(Command::Look(proto::Look::Show { name: name.clone() }), &mut drop) {
                     Some(done) => match done.said {
@@ -1634,7 +1634,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             }
             // The model learns of it from the record, as of `/remember`
             // (AGL-060, D6).
-            Next::Memory(line, MemoryAction::Remove { name, yes: true }) => {
+            Next::Memory(line, Memory::Remove { name, yes: true }) => {
                 said(&ask, &record, &presenter, Command::Remove { name }, line)
             }
             Next::Memory(line, action) => {
@@ -1878,7 +1878,7 @@ mod tests {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let n = NEXT.fetch_add(1, Ordering::SeqCst);
         let sink = Sink::default();
-        let commands = crate::cli::commands::SLASH
+        let commands = agentlibre_surface::commands::SLASH
             .iter()
             .map(|cmd| MenuItem {
                 name: cmd.name,
@@ -2468,12 +2468,12 @@ mod tests {
         f.input.key(Key::Enter);
         assert_eq!(
             f.inner().requests.memory(),
-            Some(("/memory list".into(), MemoryAction::List))
+            Some(("/memory list".into(), Memory::List))
         );
         f.inner().queue.push_back("later".into());
         assert!(matches!(
             wait_for_next(&f.input.control, &mut || {}),
-            Next::Memory(line, MemoryAction::List) if line == "/memory list"
+            Next::Memory(line, Memory::List) if line == "/memory list"
         ));
         f.inner().queue.clear();
         // During a turn it is refused, and nothing is kept.
@@ -2514,7 +2514,7 @@ mod tests {
                 f.inner().requests.memory(),
                 Some((
                     "/memory remove tea".into(),
-                    MemoryAction::Remove { name: "tea".into(), yes: true }
+                    Memory::Remove { name: "tea".into(), yes: true }
                 ))
             );
             assert!(f.inner().commands.is_empty());

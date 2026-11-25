@@ -24,7 +24,6 @@ pub mod plane;
 pub mod records;
 pub mod search;
 pub mod session;
-pub mod status;
 pub mod stop;
 pub mod strata;
 #[cfg(test)]

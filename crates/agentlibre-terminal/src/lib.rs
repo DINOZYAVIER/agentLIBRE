@@ -20,7 +20,6 @@ pub(crate) use agentlibre_core::{
     plane,
     records,
     session,
-    status,
     stop,
     weights,
     whisper,

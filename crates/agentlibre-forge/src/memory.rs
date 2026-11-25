@@ -33,7 +33,7 @@ impl Error {
     pub fn message(&self, lang: Lang) -> String {
         match self {
             Self::NoEntry { name } => tr!(lang, NO_ENTRY, name = name),
-            Self::RemoveNeedsYes { name } => tr!(lang, REMOVE_NEEDS_YES, name = name),
+            Self::RemoveNeedsYes { name } => tr!(lang, m::REMOVE_NEEDS_YES, name = name),
             Self::RemoveFailed { reason } => tr!(lang, REMOVE_FAILED, reason = reason),
         }
     }
@@ -43,12 +43,6 @@ impl Error {
 const NO_ENTRY: Msg = Msg {
     en: "no memory entry {name}",
     uk: "немає запису пам'яті {name}",
-};
-
-/// `Error::RemoveNeedsYes`.
-const REMOVE_NEEDS_YES: Msg = Msg {
-    en: "{name} not removed: there is no terminal to ask on; add --yes",
-    uk: "{name} не видалено: немає термінала, щоб спитати; додай --yes",
 };
 
 /// `Error::RemoveFailed`.

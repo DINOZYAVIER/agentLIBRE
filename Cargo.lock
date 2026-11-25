@@ -58,6 +58,7 @@ dependencies = [
  "agentlibre-common",
  "agentlibre-forge",
  "agentlibre-proto",
+ "agentlibre-surface",
  "base64",
  "hex",
  "libc",

@@ -12,8 +12,7 @@ use agentlibre_proto::{self as proto, Done, SessionView, Text, Told, TurnEnd};
 use crate::Setup;
 use agentlibre_surface::attach;
 use agentlibre_common::media::{Pending, Source};
-use crate::cli::args::{MemoryAction, look_of, memory_action};
-use crate::cli::commands;
+use agentlibre_surface::commands::{self, Memory, look_of, memory};
 use crate::cli::report::StderrReport;
 use crate::error::Error;
 use crate::error::CoreError;
@@ -21,7 +20,7 @@ use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::reasoning::ReasoningLevel;
 use crate::interrupt;
 use crate::remote;
-use crate::status::{
+use agentlibre_surface::words::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
 use agentlibre_common::tr;
@@ -121,13 +120,13 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     }
                 },
                 // With no terminal, a removal needs its `--yes` (AGL-060, D7).
-                "/memory" => match memory_action(message.split_whitespace().skip(1).map(str::to_owned)) {
+                "/memory" => match memory(message.split_whitespace().skip(1).map(str::to_owned)) {
                     Err(_) => said.fail(tr!(lang, m::MEMORY_USAGE).to_string()),
-                    Ok(MemoryAction::Remove { name, yes: false }) => said.fail(format!(
+                    Ok(Memory::Remove { name, yes: false }) => said.fail(format!(
                         "agl: {}",
-                        crate::memory::Error::RemoveNeedsYes { name }.message(lang)
+                        tr!(lang, m::REMOVE_NEEDS_YES, name = name)
                     )),
-                    Ok(MemoryAction::Remove { name, yes: true }) => {
+                    Ok(Memory::Remove { name, yes: true }) => {
                         let done = ask(Command::Remove { name }, &mut session).map_err(ended)?;
                         said.tell(of_said(done)?, lang)?;
                     }

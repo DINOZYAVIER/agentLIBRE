@@ -82,51 +82,17 @@ pub struct SessionShow {
 
 pub use crate::memory::MemoryAction;
 
-/// What `/memory list` and `/memory show` look at, as the protocol says it;
-/// a removal is not a look (AGL-130, D4).
-pub fn look_of(action: MemoryAction) -> agentlibre_proto::Look {
-    match action {
-        MemoryAction::Show { name } => agentlibre_proto::Look::Show { name },
-        _ => agentlibre_proto::Look::List,
-    }
-}
-
-/// Reads the words after `memory`, of the command line and of `/memory`.
+/// Reads the words after `memory` of the command line: the surface's
+/// parser (AGL-127, D7) with the terminal's errors and the forge's action.
 pub fn memory_action(words: impl IntoIterator<Item = String>) -> Result<MemoryAction, Error> {
-    let mut words = words.into_iter();
-    let action = words
-        .next()
-        .ok_or_else(|| Error::MissingValue("memory".into()))?;
-    let parsed = match action.as_str() {
-        "list" => MemoryAction::List,
-        "show" => MemoryAction::Show {
-            name: words
-                .next()
-                .ok_or_else(|| Error::MissingValue("show".into()))?,
-        },
-        "remove" => {
-            let mut name = None;
-            let mut yes = false;
-            for word in words.by_ref() {
-                match word.as_str() {
-                    "--yes" if yes => return Err(Error::RepeatedOption(word)),
-                    "--yes" => yes = true,
-                    _ if word.starts_with('-') || name.is_some() => {
-                        return Err(Error::UnknownOption(word));
-                    }
-                    _ => name = Some(word),
-                }
-            }
-            MemoryAction::Remove {
-                name: name.ok_or_else(|| Error::MissingValue("remove".into()))?,
-                yes,
-            }
-        }
-        _ => return Err(Error::UnknownOption(action)),
-    };
-    match words.next() {
-        Some(extra) => Err(Error::UnknownOption(extra)),
-        None => Ok(parsed),
+    use agentlibre_surface::commands::{Memory, Usage, memory};
+    match memory(words) {
+        Ok(Memory::List) => Ok(MemoryAction::List),
+        Ok(Memory::Show { name }) => Ok(MemoryAction::Show { name }),
+        Ok(Memory::Remove { name, yes }) => Ok(MemoryAction::Remove { name, yes }),
+        Err(Usage::Missing(word)) => Err(Error::MissingValue(word)),
+        Err(Usage::Unknown(word)) => Err(Error::UnknownOption(word)),
+        Err(Usage::Repeated(word)) => Err(Error::RepeatedOption(word)),
     }
 }
 

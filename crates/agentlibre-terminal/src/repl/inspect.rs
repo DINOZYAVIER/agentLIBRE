@@ -18,7 +18,7 @@ use super::term::{self, Key};
 use super::text::{clean, hard_wrap, truncate};
 use super::ModeKeys;
 use agentlibre_proto::ToolCall;
-use crate::i18n::repl as texts;
+use agentlibre_surface::words as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::records::{self, BlockKind, Record};
 use agentlibre_proto::{Event, PhaseTime};

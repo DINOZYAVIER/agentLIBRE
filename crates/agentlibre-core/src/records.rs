@@ -10,7 +10,7 @@ use agentlibre_proto::{
     Outcome, PhaseTime, ToolCall, Value,
 };
 
-use crate::i18n::repl as texts;
+use agentlibre_surface::words as texts;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::style::Role;
 use agentlibre_common::tr;
@@ -420,12 +420,12 @@ pub fn group(events: &[Event], transitions: &[PhaseTime], lang: Lang) -> Vec<Rec
                 thinking: pending_thinking.take(),
             }),
             Event::CutOff(cut) => records.push(notice(
-                crate::status::cut_off_line(cut, lang),
+                agentlibre_surface::words::cut_off_line(cut, lang),
                 Role::Muted,
                 None,
             )),
             Event::Stir { attempt, error } => records.push(notice(
-                crate::status::stir_line(*attempt, error, lang),
+                agentlibre_surface::words::stir_line(*attempt, error, lang),
                 Role::Muted,
                 Some(error.clone()),
             )),

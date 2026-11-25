@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::dock::grouped;
 use agentlibre_proto::PromptProgress;
-use crate::i18n::repl as texts;
+use agentlibre_surface::words as texts;
 use agentlibre_common::i18n::Lang;
 
 /// For this long after a figure of the server, the dock shows it as it is.

@@ -84,14 +84,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_decoding_speed_is_formatted_per_language() {
-        assert_eq!(repl::speed(46.3, Lang::En), "46.3 tok/s");
-        assert_eq!(repl::speed(46.26, Lang::En), "46.3 tok/s");
-        assert_eq!(repl::speed(46.3, Lang::Uk), "46,3 ток/с");
-        assert_eq!(repl::speed(120.0, Lang::Uk), "120,0 ток/с");
-    }
-
-    #[test]
     fn the_errors_of_a_backend_name_its_kind() {
         // AGL-038, D1: the Strata server is not called llama-server.
         let reply = |kind| {
@@ -209,78 +201,8 @@ pub mod server {
 /// Texts of the interactive session (D118, D120, D124, D134, D135, D138,
 /// AGL-013).
 pub mod repl {
-    use agentlibre_common::tr;
     use super::Lang;
-    use super::m;
-    use agentlibre_common::reasoning::ReasoningLevel;
     use crate::session::StopReason;
-
-    /// The description of a `/` command in the menu and in `/help`.
-    pub fn command(name: &str, lang: Lang) -> &'static str {
-        match name {
-            "/quit" => tr!(lang, m::CMD_QUIT),
-            "/exit" => tr!(lang, m::CMD_EXIT),
-            "/help" => tr!(lang, m::CMD_HELP),
-            "/status" => tr!(lang, m::CMD_STATUS),
-            "/think" => tr!(lang, m::CMD_THINK),
-            "/attach" => tr!(lang, m::CMD_ATTACH),
-            "/remember" => tr!(lang, m::CMD_REMEMBER),
-            "/memory" => tr!(lang, m::CMD_MEMORY),
-            "/rename" => tr!(lang, m::CMD_RENAME),
-            "/new" => tr!(lang, m::CMD_NEW),
-            "/compact" => tr!(lang, m::CMD_COMPACT),
-            "/function" => tr!(lang, m::CMD_FUNCTION),
-            "/plane" => tr!(lang, m::CMD_PLANE),
-            _ => "",
-        }
-    }
-
-    /// One line of `/status`.
-    pub fn status_line(label: &str, value: &str, lang: Lang) -> String {
-        let label = match label {
-            "session" => tr!(lang, m::LABEL_SESSION),
-            "function" => tr!(lang, m::LABEL_FUNCTION),
-            "workspace" => tr!(lang, m::LABEL_WORKSPACE),
-            "plane" => tr!(lang, m::LABEL_PLANE),
-            "server" => tr!(lang, m::LABEL_SERVER),
-            "context" => tr!(lang, m::LABEL_CONTEXT),
-            "reasoning" => tr!(lang, m::LABEL_REASONING),
-            "state" => tr!(lang, m::LABEL_STATE),
-            other => other,
-        };
-        tr!(lang, m::STATUS_LINE, label = label, value = value)
-    }
-
-    /// The reasoning level to show (AGL-013): the level's name, or the
-    /// template default when unset.
-    pub fn reasoning_level(level: Option<ReasoningLevel>, lang: Lang) -> String {
-        match level {
-            None => tr!(lang, m::REASONING_DEFAULT).to_string(),
-            Some(level) => level.name().to_string(),
-        }
-    }
-
-    /// Time as `5s`, `2m 3s` or `1h 4m`.
-    pub fn duration(seconds: u64) -> String {
-        match seconds {
-            0 => "<1s".into(),
-            1..=59 => format!("{seconds}s"),
-            60..=3599 => format!("{}m {}s", seconds / 60, seconds % 60),
-            _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
-        }
-    }
-
-    /// The decoding speed (AGL-012): `46.3 tok/s` in English and
-    /// `46,3 ток/с` in Ukrainian.
-    pub fn speed(tokens_per_second: f64, lang: Lang) -> String {
-        let number = format!("{tokens_per_second:.1}");
-        let number = if lang == Lang::Uk {
-            number.replace('.', ",")
-        } else {
-            number
-        };
-        tr!(lang, m::SPEED, speed = number)
-    }
 
     /// The line that ends a turn that stopped (D127).
     pub fn stopped(reason: StopReason, function: &crate::function::Function, lang: Lang) -> String {

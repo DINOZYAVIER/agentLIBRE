@@ -12,6 +12,8 @@ testutil = ["agentlibre-common/testutil"]
 
 [dependencies]
 agentlibre-client = { path = "../agentlibre-client" }
+# Transitional: `records` reads the words until it moves too (AGL-127, step 6).
+agentlibre-surface = { path = "../agentlibre-surface" }
 agentlibre-common = { path = "../agentlibre-common" }
 agentlibre-forge = { path = "../agentlibre-forge" }
 agentlibre-proto = { path = "../agentlibre-proto" }

@@ -14,7 +14,7 @@ use super::term::Key;
 use super::transcript::{Screen, label};
 use super::reading::Reading;
 use super::text::{hard_wrap, truncate, truncate_start, width};
-use crate::i18n::repl as texts;
+use agentlibre_surface::words as texts;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_proto::Phase;
 use agentlibre_common::style::Role;

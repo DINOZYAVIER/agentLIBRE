@@ -6,7 +6,9 @@
 
 pub mod attach;
 pub mod clipboard;
+pub mod commands;
 mod error;
 pub mod record;
+pub mod words;
 
 pub use error::Error;

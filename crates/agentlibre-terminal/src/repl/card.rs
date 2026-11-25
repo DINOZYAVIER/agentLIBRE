@@ -29,7 +29,7 @@ pub fn notice_block_lines(
     text: &str,
     role: Role,
 ) -> Vec<String> {
-    let Some((label, body)) = crate::status::notice_parts(text, lang) else {
+    let Some((label, body)) = agentlibre_surface::words::notice_parts(text, lang) else {
         let inner = columns.saturating_sub(BODY_PREFIX).max(1);
         let rows = text
             .lines()
