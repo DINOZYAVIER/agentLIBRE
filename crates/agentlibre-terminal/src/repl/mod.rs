@@ -27,7 +27,7 @@ use std::thread;
 
 use dock::{Dock, SendMode};
 use editor::{Editor, MenuItem, Outcome, save_history};
-pub use voice::DraftEngine;
+use agentlibre_surface::dictation::DraftEngine;
 use voice::{Sender, VoiceInput};
 use term::{Key, Parser, RawGuard};
 use card::{notice_lines, user_lines};
@@ -1223,7 +1223,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     // The live draft engine of the dictation (AGL-122, D5), when the daemon
     // has a draft server set: it transcribes the chunks there (AGL-127, D4).
     let draft: Option<Arc<dyn DraftEngine>> = opened.drafts.then(|| {
-        Arc::new(crate::remote::RemoteDraft {
+        Arc::new(agentlibre_surface::dictation::RemoteDraft {
             paths: paths.clone(),
             dir: opened.workspace.clone(),
             plane: opened.session.plane.clone(),
@@ -1789,8 +1789,8 @@ mod tests {
     /// The draft engine of the tests: every chunk becomes its number.
     struct FakeDraft(Arc<Fake>);
 
-    impl crate::repl::voice::DraftEngine for FakeDraft {
-        fn transcribe(&self, _wav: &[u8]) -> Result<String, CoreError> {
+    impl agentlibre_surface::dictation::DraftEngine for FakeDraft {
+        fn transcribe(&self, _wav: &[u8]) -> Result<String, agentlibre_surface::Error> {
             Ok(format!("draft{}", self.0.drafts.fetch_add(1, Ordering::SeqCst) + 1))
         }
     }
@@ -1836,17 +1836,21 @@ mod tests {
 
     struct FakeDictation(Arc<Fake>);
 
-    impl crate::whisper::Dictation for FakeDictation {
-        fn ready(&self) -> Result<(), CoreError> {
+    impl agentlibre_surface::dictation::Dictation for FakeDictation {
+        fn ready(&self) -> Result<(), agentlibre_surface::Error> {
             if self.0.not_ready.load(Ordering::SeqCst) {
-                return Err(CoreError::Whisper(crate::whisper::Error::NotSet {
+                // What the daemon says of a whisper that is not set, as the
+                // surface hears it: a refusal with the words.
+                let text = CoreError::Whisper(crate::whisper::Error::NotSet {
                     user_path: "/c/settings.nix".into(),
                     project_path: "/d/settings.nix".into(),
-                }));
+                })
+                .message(Lang::En);
+                return Err(agentlibre_client::Error::Said { text }.into());
             }
             Ok(())
         }
-        fn warm_up(&self, _: &mut dyn FnMut(&str)) -> Result<(), CoreError> {
+        fn warm_up(&self, _: &mut dyn FnMut(&str)) -> Result<(), agentlibre_surface::Error> {
             self.0.log.lock().unwrap().push("warm".into());
             Ok(())
         }
@@ -1855,7 +1859,7 @@ mod tests {
             wav: &[u8],
             _prompt: Option<&str>,
             _: &mut dyn FnMut(&str),
-        ) -> Result<String, CoreError> {
+        ) -> Result<String, agentlibre_surface::Error> {
             while self.0.hold.load(Ordering::SeqCst) {
                 thread::sleep(std::time::Duration::from_millis(5));
             }

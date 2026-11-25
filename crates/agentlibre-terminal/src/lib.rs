@@ -21,13 +21,12 @@ pub(crate) use agentlibre_core::{
     session,
     stop,
     weights,
-    whisper,
     wsl,
 };
 // What the tests of the surfaces drive: the run's own reports, phases and
 // tools (AGL-130, D12).
 #[cfg(test)]
-pub(crate) use agentlibre_core::{agent, media, phase, tools};
+pub(crate) use agentlibre_core::{agent, media, phase, tools, whisper};
 pub(crate) use agentlibre_forge::{forge, memory};
 
 use std::ffi::OsString;
@@ -86,7 +85,7 @@ pub struct Setup {
     /// the daemon's socket.
     pub paths: Paths,
     /// The REPL's voice, by the daemon (AGL-076, D15).
-    pub voice: Arc<dyn whisper::Dictation>,
+    pub voice: Arc<dyn agentlibre_surface::dictation::Dictation>,
 }
 
 pub fn cli() -> ExitCode {
@@ -354,7 +353,7 @@ fn agent_session(
             plane: plane.clone(),
             function: opened.function.clone(),
         });
-        let voice = Arc::new(remote::RemoteVoice {
+        let voice = Arc::new(agentlibre_surface::dictation::RemoteVoice {
             paths: paths.clone(),
             dir: opened.workspace.clone(),
             plane,

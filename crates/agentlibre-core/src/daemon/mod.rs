@@ -35,7 +35,7 @@ use crate::session::Session;
 use agentlibre_common::settings::{ServerKind, Settings, UserFile};
 use crate::stop::Stop;
 use agentlibre_common::tr;
-use crate::whisper::{Dictation, Draft, Voice};
+use crate::whisper::{Draft, Voice};
 
 use servers::{Clock, SWEEP_POLL};
 

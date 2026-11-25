@@ -15,7 +15,6 @@ use crate::error::CoreError as Error;
 use agentlibre_common::i18n::Lang;
 use crate::interrupt;
 use agentlibre_common::paths::Paths;
-use crate::whisper::Dictation;
 
 /// What the terminal opens.
 pub struct Opening<'a> {
@@ -95,86 +94,4 @@ pub fn forward_stop(remote: &Arc<Remote>) {
             thread::sleep(Duration::from_millis(50));
         }
     });
-}
-
-/// The REPL's voice by the daemon's transcription (D15), on a connection
-/// of its own.
-pub struct RemoteVoice {
-    pub paths: Paths,
-    pub dir: String,
-    pub plane: Option<String>,
-    pub lang: Lang,
-}
-
-impl Dictation for RemoteVoice {
-    fn ready(&self) -> Result<(), Error> {
-        Ok(())
-    }
-
-    fn warm_up(&self, _say: &mut dyn FnMut(&str)) -> Result<(), Error> {
-        Ok(())
-    }
-
-    fn transcribe(
-        &self,
-        wav: &[u8],
-        _prompt: Option<&str>,
-        _say: &mut dyn FnMut(&str),
-    ) -> Result<String, Error> {
-        let client = agentlibre_surface::daemon::connect(&self.paths, false, self.lang, true)
-            .map_err(crate::error::core_of)?;
-        let request = Request::Transcribe {
-            dir: self.dir.clone(),
-            plane: self.plane.clone(),
-            audio: proto::Attached {
-                number: 1,
-                kind: proto::MediaKind::Audio,
-                name: "voice.wav".into(),
-                ext: "wav".into(),
-                base64: proto::base64::encode(wav),
-            },
-            draft: false,
-        };
-        match client.ask(&request, &mut |_| {})? {
-            Reply::Transcribed { text } => Ok(text),
-            reply => Err(Error::Daemon {
-                detail: format!("an unexpected reply: {reply:?}"),
-            }),
-        }
-    }
-}
-
-/// The draft of the live dictation by the daemon's draft server (AGL-127,
-/// D4): each chunk goes on a connection of its own, as `RemoteVoice`'s
-/// does, and the worker's one thread keeps their order.
-pub struct RemoteDraft {
-    pub paths: Paths,
-    pub dir: String,
-    pub plane: Option<String>,
-    pub lang: Lang,
-}
-
-impl crate::repl::DraftEngine for RemoteDraft {
-    fn transcribe(&self, wav: &[u8]) -> Result<String, Error> {
-        let client = agentlibre_surface::daemon::connect(&self.paths, false, self.lang, true)
-            .map_err(crate::error::core_of)?;
-        let request = Request::Transcribe {
-            dir: self.dir.clone(),
-            plane: self.plane.clone(),
-            audio: proto::Attached {
-                number: 1,
-                kind: proto::MediaKind::Audio,
-                name: "chunk.wav".into(),
-                ext: "wav".into(),
-                base64: proto::base64::encode(wav),
-            },
-            draft: true,
-        };
-        match client.ask(&request, &mut |_| {})? {
-            Reply::Transcribed { text } => Ok(text),
-            reply => Err(Error::Daemon {
-                detail: format!("an unexpected reply: {reply:?}"),
-            }),
-        }
-    }
 }

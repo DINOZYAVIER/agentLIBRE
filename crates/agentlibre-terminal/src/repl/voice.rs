@@ -17,8 +17,8 @@ use super::term::Key;
 use super::card::notice_lines;
 use super::transcript::Screen;
 use super::Notice;
-use crate::whisper::Dictation;
-use crate::error::CoreError as Error;
+use agentlibre_surface::Error;
+use agentlibre_surface::dictation::{Dictation, DraftEngine, DraftWorker, compose, merge_draft};
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_surface::record::Recording;
 use crate::theme::Theme;
@@ -33,47 +33,6 @@ pub type Recorder = Box<dyn Fn(u32) -> Result<Box<dyn Recording>, agentlibre_sur
 
 /// Queues an auto-sent transcript (AGL-123, D1).
 pub type Sender = Arc<dyn Fn(String) + Send + Sync>;
-
-/// What turns a chunk into draft text; `RemoteDraft` asks the daemon's draft
-/// server, the tests fake it (AGL-122; AGL-127, D4).
-pub trait DraftEngine: Send + Sync {
-    fn transcribe(&self, wav: &[u8]) -> Result<String, Error>;
-}
-
-/// The draft engine at work (AGL-122): one thread turns chunks into text
-/// one by one, so the lines keep their order; when the last sender of
-/// the recording drops, it stops.
-struct DraftWorker {
-    chunks: MpscSender<(Vec<u8>, u64)>,
-    texts: Receiver<(String, u64)>,
-    _thread: JoinHandle<()>,
-}
-
-impl DraftWorker {
-    fn start(draft: Arc<dyn DraftEngine>) -> DraftWorker {
-        let (ctx, crx) = mpsc::channel::<(Vec<u8>, u64)>();
-        let (tx, rx) = mpsc::channel::<(String, u64)>();
-        let thread = thread::spawn(move || {
-            while let Ok(mut chunk) = crx.recv() {
-                // The latest window when the engine falls behind the
-                // clock (D10): a stale window would lag the human's
-                // mouth, and the next one re-hears its tail anyway.
-                while let Ok(fresher) = crx.try_recv() {
-                    chunk = fresher;
-                }
-                // A chunk that failed or came out empty shows nothing:
-                // the final pass has the last word (D7).
-                if let Ok(text) = draft.transcribe(&chunk.0)
-                    && !text.is_empty()
-                    && tx.send((text, chunk.1)).is_err()
-                {
-                    break;
-                }
-            }
-        });
-        DraftWorker { chunks: ctx, texts: rx, _thread: thread }
-    }
-}
 
 /// A piece of the recording for the final pass (AGL-122, D12): the
 /// audio, the confirmed text before it as prompt, and where it ends.
@@ -94,7 +53,7 @@ struct FinalWorker {
 }
 
 impl FinalWorker {
-    fn start(dictation: Arc<dyn crate::whisper::Dictation>, warm: Option<JoinHandle<Result<(), Error>>>) -> FinalWorker {
+    fn start(dictation: Arc<dyn Dictation>, warm: Option<JoinHandle<Result<(), Error>>>) -> FinalWorker {
         let (ctx, crx) = mpsc::channel::<FinalSeg>();
         let (tx, rx) = mpsc::channel::<(u64, Result<String, Error>)>();
         let thread = thread::spawn(move || {
@@ -112,54 +71,6 @@ impl FinalWorker {
             }
         });
         FinalWorker { req: ctx, res: rx, _thread: thread }
-    }
-}
-
-/// The draft after one more window's text (AGL-122, D10): the windows
-/// overlap in audio, so their texts repeat the words on the seam — the
-/// longest run of words that ends the draft and begins the new text is
-/// spoken once. Words compare lowercase and bare of punctuation, which
-/// two hearings of the same syllable rarely agree on otherwise.
-fn merge_draft(text: &str, fresh: &str) -> String {
-    fn norm(word: &str) -> String {
-        word.chars()
-            .filter(|c| c.is_alphanumeric())
-            .flat_map(|c| c.to_lowercase())
-            .collect()
-    }
-    let old: Vec<&str> = text.split_whitespace().collect();
-    let new: Vec<&str> = fresh.split_whitespace().collect();
-    let cap = old.len().min(new.len()).min(8);
-    let mut shared = 0;
-    for n in (1..=cap).rev() {
-        if old[old.len() - n..].iter().map(|w| norm(w)).eq(new[..n].iter().map(|w| norm(w))) {
-            shared = n;
-            break;
-        }
-    }
-    let mut out = text.to_owned();
-    for word in &new[shared..] {
-        if !out.is_empty() {
-            out.push(' ');
-        }
-        out.push_str(word);
-    }
-    out
-}
-
-/// What the live block says (AGL-122, D12): the confirmed pieces first,
-/// then the draft beyond the last of them; where confirmed and draft
-/// meet, the seam folds as between two windows.
-fn compose(confirmed: &str, drafts: &[(u64, String)], upto: u64) -> String {
-    let first = drafts.iter().position(|(end, _)| *end > upto).unwrap_or(drafts.len());
-    let mut tail = String::new();
-    for (_, text) in &drafts[first..] {
-        tail = merge_draft(&tail, text);
-    }
-    if confirmed.is_empty() {
-        tail
-    } else {
-        merge_draft(confirmed, &tail)
     }
 }
 
@@ -532,7 +443,7 @@ impl VoiceInput {
         // The last piece of the recording joins the rest (D12); the
         // whole WAV is kept for the answer of the fallback pass.
         let tail = recording.take_final_tail();
-        let wav = recording.stop().map_err(crate::error::core_of)?;
+        let wav = recording.stop()?;
         if final_worker.is_some() && (final_sent > 0 || tail.is_some()) && !final_failed {
             let fw = final_worker.take().unwrap();
             let mut pending = final_sent;
@@ -591,50 +502,5 @@ impl VoiceInput {
             self.dock.set_draft(None);
             self.dock.set_voice(None);
         }
-    }
-}
-
-#[cfg(test)]
-mod seam_tests {
-    use super::{compose, merge_draft};
-
-    #[test]
-    fn the_block_is_confirmed_text_then_the_draft_beyond() {
-        let drafts = vec![(1200, "пере проверка".to_string()), (2400, "проверка связи".to_string())];
-        // Nothing confirmed yet: the draft whole, seam folded.
-        assert_eq!(compose("", &drafts, 0), "пере проверка связи");
-        // A piece confirmed to 1200 ms: the draft words it covers leave,
-        // the later draft stays, the meeting seam folds once (D12).
-        assert_eq!(compose("Проверка", &drafts, 1200), "Проверка связи");
-        // All confirmed, nothing owed: no draft beyond.
-        assert_eq!(compose("проверка связи", &[], 2400), "проверка связи");
-    }
-
-    #[test]
-    fn the_words_on_the_seam_are_spoken_once() {
-        // The windows overlap in audio, so the engine hears "still wa"
-        // twice: the draft must not write it twice (D10).
-        assert_eq!(merge_draft("he said still waiting", "still waiting for you"), "he said still waiting for you");
-    }
-
-    #[test]
-    fn the_seam_survives_case_and_punctuation_disputes() {
-        // Two hearings of the same syllable disagree on commas and
-        // caps; the fold does not care.
-        assert_eq!(merge_draft("пришел, и", "И ушел"), "пришел, и ушел");
-    }
-
-    #[test]
-    fn no_seam_means_plain_append() {
-        assert_eq!(merge_draft("one two", "three four"), "one two three four");
-        assert_eq!(merge_draft("", "first"), "first");
-        assert_eq!(merge_draft("kept", ""), "kept");
-    }
-
-    #[test]
-    fn a_repeated_word_is_not_eaten_when_it_is_not_the_seam() {
-        // The fold looks only at the seam: a word that repeats in the
-        // middle of the new text is nobody's echo.
-        assert_eq!(merge_draft("the word", "a word here more"), "the word a word here more");
     }
 }

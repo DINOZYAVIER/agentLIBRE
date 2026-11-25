@@ -293,24 +293,6 @@ pub fn transcribe(
         .ok_or_else(|| fail("no `text` in the reply".into())).map_err(Into::into)
 }
 
-/// What the REPL's voice input needs of whisper (AGL-016).
-pub trait Dictation: Send + Sync {
-    /// Whether whisper is set up for this project; the error says what is
-    /// missing, before the human speaks.
-    fn ready(&self) -> Result<(), error::Error>;
-    /// Brings the server up; returns when it answers (D6).
-    fn warm_up(&self, say: &mut dyn FnMut(&str)) -> Result<(), error::Error>;
-    /// The text of a 16 kHz mono WAV, `prompt` the tail of the text
-    /// that came before it when the WAV is a piece of a longer speech
-    /// (AGL-122, D12).
-    fn transcribe(
-        &self,
-        wav: &[u8],
-        prompt: Option<&str>,
-        say: &mut dyn FnMut(&str),
-    ) -> Result<String, error::Error>;
-}
-
 /// Who turns a recording into text (AGL-051): the model of the Function when
 /// it hears, whisper otherwise.
 #[derive(Debug, PartialEq, Eq)]
@@ -372,15 +354,18 @@ impl Voice {
     }
 }
 
-impl Dictation for Voice {
-    fn ready(&self) -> Result<(), error::Error> {
+impl Voice {
+    /// Whether whisper is set up for this project; the error says what is
+    /// missing, before the human speaks.
+    pub fn ready(&self) -> Result<(), error::Error> {
         match self.route()? {
             Route::Whisper => self.server().map(|_| ()),
             Route::Model | Route::ModelLoading => Ok(()),
         }
     }
 
-    fn warm_up(&self, say: &mut dyn FnMut(&str)) -> Result<(), error::Error> {
+    /// Brings the server up; returns when it answers (D6).
+    pub fn warm_up(&self, say: &mut dyn FnMut(&str)) -> Result<(), error::Error> {
         match (self.route()?, &self.model) {
             (Route::ModelLoading, Some((model, what))) => {
                 wait_ready(model, None, what, say, self.lang)
@@ -393,7 +378,10 @@ impl Dictation for Voice {
         }
     }
 
-    fn transcribe(
+    /// The text of a 16 kHz mono WAV, `prompt` the tail of the text that
+    /// came before it when the WAV is a piece of a longer speech (AGL-122,
+    /// D12).
+    pub fn transcribe(
         &self,
         wav: &[u8],
         prompt: Option<&str>,
