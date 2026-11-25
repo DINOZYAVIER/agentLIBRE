@@ -107,7 +107,7 @@ macro_rules! from_core {
     };
 }
 
-from_core!(backend, engine, function, machine, plane, session);
+from_core!(backend, engine, function, plane, session);
 
 /// The stores crate's errors are the core's, and so the terminal's
 /// (AGL-121, D77).
@@ -134,13 +134,9 @@ macro_rules! from_core_file {
     };
 }
 
-from_core_file!(download, format, media, search, strata, weights, whisper, wsl);
+from_core_file!(weights, wsl);
 
-impl From<crate::memory::Error> for Error {
-    fn from(source: crate::memory::Error) -> Error {
-        Error::Core(source.into())
-    }
-}
+
 
 /// A common module's own error, wrapped by the core's.
 macro_rules! from_common {
@@ -153,13 +149,9 @@ macro_rules! from_common {
     };
 }
 
-from_common!(error, nix, paths, programs);
+from_common!(error,    nix,    paths,    programs);
 
-impl From<agentlibre_common::settings::error::Error> for Error {
-    fn from(source: agentlibre_common::settings::error::Error) -> Error {
-        Error::Core(source.into())
-    }
-}
+
 
 impl Error {
     /// Whether the error is in the command line rather than the setup:
