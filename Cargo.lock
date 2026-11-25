@@ -97,6 +97,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentlibre-surface"
+version = "0.1.0"
+dependencies = [
+ "agentlibre-client",
+ "agentlibre-common",
+ "agentlibre-proto",
+]
+
+[[package]]
 name = "asn1-rs"
 version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,17 @@
+[package]
+name = "agentlibre-surface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "What a client has because it runs on the human's own computer, and what every surface shows the same way: the microphone, the dictation, the attachments, the slash commands, the records (AGL-127)"
+
+# The core, the forge, a terminal and a GUI library are not beneath it, so
+# the REPL and the graphical chat share it (AGL-127, D1).
+[dependencies]
+agentlibre-client = { path = "../agentlibre-client" }
+agentlibre-common = { path = "../agentlibre-common" }
+agentlibre-proto = { path = "../agentlibre-proto" }
+
+[dev-dependencies]
+agentlibre-common = { path = "../agentlibre-common", features = ["testutil"] }
