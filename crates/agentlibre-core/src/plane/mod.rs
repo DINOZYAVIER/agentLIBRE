@@ -615,23 +615,24 @@ impl Run {
         match ready {
             Ok(size) => self.turn_on_scoped(size, message, wake, attached, &mut observer, surface),
             Err(error) => {
-                // Nobody was there to be told: the record says what was
-                // asked of the agent, and what it met (AGL-125, D7).
-                if matches!(
-                    error,
-                    Error::Engine(crate::engine::error::Error::QuestionUnanswered { .. })
-                ) {
-                    let message = match wake {
-                        Some(flow) => Event::Wake { flow: flow.into(), text: message.into() },
-                        None => Event::User(message.into()),
-                    };
-                    let _ = self.session.append(message);
-                    let _ = self.session.append(Event::System {
+                // It never reached the agent, and may have nobody to be told
+                // it: the record says what was asked and what it met
+                // (AGL-125, D2, D9).
+                let message = match wake {
+                    Some(flow) => Event::Wake { flow: flow.into(), text: message.into() },
+                    None => Event::User(message.into()),
+                };
+                let met = match &error {
+                    Error::Common(agentlibre_common::error::Error::Interrupted) => {
+                        Event::Stop(crate::session::StopReason::Interrupted)
+                    }
+                    error => Event::System {
                         text: error.message(self.lang),
                         failed: true,
-                    });
-                }
-                // A start that failed never reached the agent.
+                    },
+                };
+                let _ = self.session.append(message);
+                let _ = self.session.append(met);
                 observer.end(PhaseEvent::Failed, &mut *surface);
                 surface.over();
                 Err(error)

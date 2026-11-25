@@ -418,6 +418,10 @@ mod tests {
     struct Fake {
         hold: AtomicBool,
         calls: AtomicUsize,
+        /// It does not say its context, as a server that did not start.
+        broken: AtomicBool,
+        /// A Ctrl-C came as it started.
+        stopped: AtomicBool,
     }
 
     impl Backend for Fake {
@@ -458,6 +462,12 @@ mod tests {
         }
 
         fn context_size(&self) -> Result<usize, Error> {
+            if self.stopped.load(Ordering::SeqCst) {
+                return Err(Error::Common(agentlibre_common::error::Error::Interrupted));
+            }
+            if self.broken.load(Ordering::SeqCst) {
+                return Err(Error::Said { text: "no server".into() });
+            }
             Ok(16384)
         }
 
@@ -590,6 +600,35 @@ mod tests {
                 past.take(&sent);
             }
         }
+    }
+
+    #[test]
+    fn a_message_whose_server_did_not_start_is_in_the_record() {
+        // AGL-125, D2, D9.
+        let dir = TempDir::new();
+        let fake = Arc::new(Fake::default());
+        fake.broken.store(true, Ordering::SeqCst);
+        let handle = run(&dir, Arc::clone(&fake)).start();
+        let done = handle.ask(say("Hello"), &mut |_| {}).unwrap();
+        assert!(matches!(done.turn, Some(Err(Error::Said { .. }))));
+        assert_eq!(
+            done.session.events,
+            [
+                Event::User("Hello".into()),
+                Event::System { text: "no server".into(), failed: true },
+            ]
+        );
+        fake.stopped.store(true, Ordering::SeqCst);
+        let done = handle.ask(say("Again"), &mut |_| {}).unwrap();
+        assert_eq!(
+            done.session.events[2..],
+            [Event::User("Again".into()), Event::Stop(StopReason::Interrupted)]
+        );
+        // It goes on from there.
+        fake.stopped.store(false, Ordering::SeqCst);
+        fake.broken.store(false, Ordering::SeqCst);
+        let done = handle.ask(say("Now"), &mut |_| {}).unwrap();
+        assert!(matches!(done.turn, Some(Ok(TurnEnd::Answer(_)))));
     }
 
     #[test]
