@@ -341,46 +341,100 @@ fn step_phases(
     (spans, run)
 }
 
-/// The events of a session into the records (AGL-066). `transitions` are
-/// the phases' times of the steps, by their turn and step; the steps are
-/// the calls, 1-based within their turn, and the turns the user messages.
-pub fn group(events: &[Event], transitions: &[PhaseTime], lang: Lang) -> Vec<Record> {
-    let mut records = Vec::new();
-    let mut turn = 0;
-    let mut step = 0;
-    // Only a change of state is a record (AGL-046, D13), as in the
-    // transcript: the first visit of a turn is not a change.
-    let mut state_entered = false;
-    // The thinking of a step goes with its record: the call of the step,
-    // or the answer (D19).
-    let mut pending_thinking: Option<String> = None;
-    for event in events {
+/// The fold of a session's events into records (AGL-066; AGL-127, D3): one
+/// event at a time, so that a surface that is told what a session does can
+/// keep its records as they come, and `group` feeds it a whole past. The
+/// number of the turn and of the step, whether the first state of a turn was
+/// seen, and the thinking that waits for its step are its state.
+pub struct Fold {
+    lang: Lang,
+    records: Vec<Record>,
+    /// The turn and the step of each record that is a step's call, by the
+    /// index of the record: where its phases' times are looked up.
+    steps: Vec<Option<(usize, usize)>>,
+    transitions: Vec<PhaseTime>,
+    turn: usize,
+    step: usize,
+    /// Only a change of state is a record (AGL-046, D13), as in the
+    /// transcript: the first visit of a turn is not a change.
+    state_entered: bool,
+    /// The thinking of a step goes with its record: the call of the step,
+    /// or the answer (D19).
+    pending_thinking: Option<String>,
+}
+
+impl Fold {
+    pub fn new(lang: Lang) -> Fold {
+        Fold {
+            lang,
+            records: Vec::new(),
+            steps: Vec::new(),
+            transitions: Vec::new(),
+            turn: 0,
+            step: 0,
+            state_entered: false,
+            pending_thinking: None,
+        }
+    }
+
+    /// The records so far.
+    pub fn records(&self) -> &[Record] {
+        &self.records
+    }
+
+    /// The records, the fold done.
+    pub fn into_records(self) -> Vec<Record> {
+        self.records
+    }
+
+    /// The phases' times of the steps, by their turn and step: the phases of
+    /// the steps already folded are made anew from them, so the times may come
+    /// before the events or after them.
+    pub fn times(&mut self, transitions: &[PhaseTime]) {
+        self.transitions = transitions.to_vec();
+        for (record, key) in self.records.iter_mut().zip(&self.steps) {
+            if let (Record::Tool { call, phases, time, .. }, Some((turn, step))) = (record, key) {
+                (*phases, *time) = step_phases(*turn, *step, &self.transitions, &call.name, self.lang);
+            }
+        }
+    }
+
+    fn push(&mut self, record: Record) {
+        self.records.push(record);
+        self.steps.push(None);
+    }
+
+    /// Folds the next event of the session.
+    pub fn event(&mut self, event: &Event) {
+        let lang = self.lang;
         match event {
             Event::User(text) => {
-                turn += 1;
-                step = 0;
-                state_entered = false;
-                records.push(Record::User(text.clone()));
+                self.turn += 1;
+                self.step = 0;
+                self.state_entered = false;
+                self.push(Record::User(text.clone()));
             }
             Event::Wake { flow, text } => {
-                turn += 1;
-                step = 0;
-                state_entered = false;
-                records.push(Record::Wake { flow: flow.clone(), text: text.clone() });
+                self.turn += 1;
+                self.step = 0;
+                self.state_entered = false;
+                self.push(Record::Wake { flow: flow.clone(), text: text.clone() });
             }
             Event::State(state) => {
-                if std::mem::replace(&mut state_entered, true) {
-                    records.push(Record::State(state.clone()));
+                if std::mem::replace(&mut self.state_entered, true) {
+                    self.push(Record::State(state.clone()));
                 }
             }
             Event::Thinking(text) => {
                 // The thinking goes with the record of its step (D19).
-                pending_thinking = Some(text.clone());
+                self.pending_thinking = Some(text.clone());
             }
             Event::Call { text, call, summary } => {
-                step += 1;
-                let (phases, time) = step_phases(turn, step, transitions, &call.name, lang);
-                records.push(Record::Tool {
+                self.step += 1;
+                let (phases, time) =
+                    step_phases(self.turn, self.step, &self.transitions, &call.name, lang);
+                let thinking = self.pending_thinking.take();
+                self.push(Record::Tool {
                     call: call.clone(),
                     result: None,
                     // The daemon's table of tools sums the call up (AGL-121,
@@ -388,9 +442,12 @@ pub fn group(events: &[Event], transitions: &[PhaseTime], lang: Lang) -> Vec<Rec
                     hint: summary.clone().unwrap_or_default(),
                     phases,
                     time,
-                    thinking: pending_thinking.take(),
+                    thinking,
                     text: text.clone(),
                 });
+                if let Some(key) = self.steps.last_mut() {
+                    *key = Some((self.turn, self.step));
+                }
             }
             Event::Result {
                 id,
@@ -398,33 +455,36 @@ pub fn group(events: &[Event], transitions: &[PhaseTime], lang: Lang) -> Vec<Rec
                 content,
             } => {
                 // The last call of the id without a result (D108).
-                let Some(offset) = records.iter().rev().position(|record| {
+                let Some(offset) = self.records.iter().rev().position(|record| {
                     matches!(
                         record,
                         Record::Tool { call, result, .. } if call.id == *id && result.is_none()
                     )
                 }) else {
-                    continue;
+                    return;
                 };
-                let index = records.len() - 1 - offset;
-                if let Record::Tool { result, .. } = &mut records[index] {
+                let index = self.records.len() - 1 - offset;
+                if let Record::Tool { result, .. } = &mut self.records[index] {
                     *result = Some(ToolResult {
                         outcome: *outcome,
                         content: content.clone(),
                     });
                 }
             }
-            Event::Answer(text) => records.push(Record::Answer {
-                text: text.clone(),
-                time: None,
-                thinking: pending_thinking.take(),
-            }),
-            Event::CutOff(cut) => records.push(notice(
+            Event::Answer(text) => {
+                let thinking = self.pending_thinking.take();
+                self.push(Record::Answer {
+                    text: text.clone(),
+                    time: None,
+                    thinking,
+                });
+            }
+            Event::CutOff(cut) => self.push(notice(
                 crate::words::cut_off_line(cut, lang),
                 Role::Muted,
                 None,
             )),
-            Event::Stir { attempt, error } => records.push(notice(
+            Event::Stir { attempt, error } => self.push(notice(
                 crate::words::stir_line(*attempt, error, lang),
                 Role::Muted,
                 Some(error.clone()),
@@ -433,13 +493,13 @@ pub fn group(events: &[Event], transitions: &[PhaseTime], lang: Lang) -> Vec<Rec
             // call (the hint row says what it did); the events keep the
             // writes in the session's file.
             Event::Forge { .. } | Event::Memory { .. } | Event::Stop(_) => {}
-            Event::Media(medium) => records.push(notice(media_line(medium, lang), Role::Muted, None)),
-            Event::Compact { summary, .. } => records.push(notice(
+            Event::Media(medium) => self.push(notice(media_line(medium, lang), Role::Muted, None)),
+            Event::Compact { summary, .. } => self.push(notice(
                 tr!(lang, m::COMPACTING).to_string(),
                 Role::Muted,
                 Some(summary.clone()),
             )),
-            Event::Command(run) => records.push(notice(
+            Event::Command(run) => self.push(notice(
                 run.line.clone(),
                 if run.failed {
                     Role::StatusFailure
@@ -448,7 +508,7 @@ pub fn group(events: &[Event], transitions: &[PhaseTime], lang: Lang) -> Vec<Rec
                 },
                 run.output.clone(),
             )),
-            Event::System { text, failed } => records.push(notice(
+            Event::System { text, failed } => self.push(notice(
                 text.clone(),
                 if *failed {
                     Role::StatusFailure
@@ -459,7 +519,18 @@ pub fn group(events: &[Event], transitions: &[PhaseTime], lang: Lang) -> Vec<Rec
             )),
         }
     }
-    records
+}
+
+/// The events of a session into the records (AGL-066). `transitions` are
+/// the phases' times of the steps, by their turn and step; the steps are
+/// the calls, 1-based within their turn, and the turns the user messages.
+pub fn group(events: &[Event], transitions: &[PhaseTime], lang: Lang) -> Vec<Record> {
+    let mut fold = Fold::new(lang);
+    fold.times(transitions);
+    for event in events {
+        fold.event(event);
+    }
+    fold.into_records()
 }
 
 #[cfg(test)]
@@ -816,5 +887,78 @@ mod tests {
         assert!(lines[0].starts_with("* a          user  llama   m.gguf"), "{}", lines[0]);
         assert!(lines[1].starts_with("  long-name  user  llama   m.gguf"), "{}", lines[1]);
         assert!(lines[1].contains("built-in"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn the_same_events_at_once_and_one_by_one_make_the_same_records() {
+        // AGL-127, D3: `group` is a fold fed a whole past; the times may come
+        // before the events or after them.
+        let events = [
+            Event::User("go".into()),
+            Event::State("work".into()),
+            Event::Thinking("hm".into()),
+            Event::Call {
+                text: Some("I will run it.".into()),
+                call: call("c1", "ls"),
+                summary: Some("ls".into()),
+            },
+            Event::Result {
+                id: "c1".into(),
+                outcome: Outcome::Ok,
+                content: "a".into(),
+            },
+            Event::Call {
+                text: None,
+                call: call("c2", "pwd"),
+                summary: Some("pwd".into()),
+            },
+            Event::State("done".into()),
+            Event::Answer("Done.".into()),
+            Event::User("again".into()),
+            Event::Call {
+                text: None,
+                call: call("c3", "ls"),
+                summary: Some("ls".into()),
+            },
+            Event::Result {
+                id: "c3".into(),
+                outcome: Outcome::Fail,
+                content: "no".into(),
+            },
+            Event::Result {
+                id: "c2".into(),
+                outcome: Outcome::Ok,
+                content: "here".into(),
+            },
+        ];
+        let transitions = [
+            line(1, 1, "Prefill", 100),
+            line(1, 1, "Running", 50),
+            line(1, 2, "Thinking", 30),
+            line(2, 1, "Running", 7),
+        ];
+        let at_once = group(&events, &transitions, Lang::En);
+        // The times first, the events one at a time.
+        let mut fold = Fold::new(Lang::En);
+        fold.times(&transitions);
+        for event in &events {
+            fold.event(event);
+        }
+        assert_eq!(fold.records(), at_once);
+        // The events first: the times make the phases of what was folded.
+        let mut late = Fold::new(Lang::En);
+        for (n, event) in events.iter().enumerate() {
+            late.event(event);
+            // What is folded so far is a prefix of the whole.
+            assert!(late.records().len() <= at_once.len(), "{n}");
+        }
+        late.times(&transitions);
+        assert_eq!(late.records(), at_once);
+        // The phases are there: the first step spent 100 ms reading.
+        let Record::Tool { phases, time, .. } = &at_once[1] else {
+            panic!("{:?}", at_once[1]);
+        };
+        assert_eq!(phases.len(), 2);
+        assert_eq!(*time, Some(Duration::from_millis(50)));
     }
 }
