@@ -18,7 +18,6 @@ pub(crate) use agentlibre_core::{
     i18n,
     plane,
     session,
-    stop,
     weights,
     wsl,
 };

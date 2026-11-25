@@ -83,11 +83,11 @@ pub fn forward_stop(remote: &Arc<Remote>) {
     let remote = Arc::clone(remote);
     thread::spawn(move || {
         loop {
-            if interrupt::stop().requested() {
+            if interrupt::requested() {
                 remote.stop();
                 // The next Ctrl-C asks again; a second during a turn exits
                 // as before (D111 to D113).
-                while interrupt::stop().requested() {
+                while interrupt::requested() {
                     thread::sleep(Duration::from_millis(50));
                 }
             }
