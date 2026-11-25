@@ -41,9 +41,9 @@ impl Daemon {
         let entry = state
             .sessions
             .get_mut(session)
-            .ok_or_else(|| super::error::Error::NoSession { id: session.into() })?;
+            .ok_or_else(|| Error::NoSession { id: session.into() })?;
         let command = make(entry);
-        entry.commands.send(command).map_err(|_| Error::PlaneGone)?;
+        entry.commands.send(command).map_err(|_| Error::Core(CoreError::PlaneGone))?;
         entry.busy |= busy;
         entry.origins.push_back(client);
         if answer && let Some(client) = state.clients.get(&client) {
@@ -84,7 +84,7 @@ impl Daemon {
             .into())
         })?;
         if open.resume.is_some() && open.function.is_some() {
-            return Err(Error::FunctionWithResume);
+            return Err(Error::Core(CoreError::FunctionWithResume));
         }
         // A running session is attached to (D12); one that is not is loaded
         // once, whoever asks for it meanwhile (AGL-125, D1).
@@ -383,7 +383,7 @@ impl Daemon {
 mod tests {
     use super::*;
 
-    use crate::daemon::tests::{Client, daemon, open};
+    use crate::tests::{Client, daemon, open};
     use agentlibre_common::testutil::TempDir;
 
     /// A session open in a daemon whose turns go on until they are stopped.
@@ -399,7 +399,7 @@ mod tests {
             paths.config.join("settings.nix"),
             format!(
                 r#"{{ agl, ... }}: {{ function = "fixture-minimal"; {settings} server.llama = {{ url = "{}"; external = true; }}; }}"#,
-                crate::daemon::tests::holding_server()
+                crate::tests::holding_server()
             ),
         )
         .unwrap();
@@ -435,7 +435,7 @@ mod tests {
             paths.config.join("settings.nix"),
             format!(
                 r#"{{ agl, ... }}: {{ function = "fixture-minimal"; {settings} server.llama = {{ url = "{}"; external = true; }}; }}"#,
-                crate::daemon::tests::holding_server()
+                crate::tests::holding_server()
             ),
         )
         .unwrap();

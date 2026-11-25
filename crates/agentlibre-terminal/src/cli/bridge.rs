@@ -13,7 +13,6 @@ use qrcode::{Color, EcLevel, QrCode};
 
 use crate::engine::{port_open, unit_active};
 use crate::error::Error;
-use crate::error::CoreError;
 use crate::engine::error::Error as EngineError;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::outln;
@@ -66,11 +65,11 @@ pub fn run(action: BridgeAction, user: &UserFile, paths: &Paths, lang: Lang) -> 
                 return Ok(ExitCode::SUCCESS);
             }
             store.certificate().map_err(store_error)?;
-            let runtime = paths.runtime.as_deref().ok_or(Error::from(CoreError::DaemonNoRuntime))?;
+            let runtime = paths.runtime.as_deref().ok_or(Error::Client(agentlibre_client::Error::NoRuntime))?;
             // The daemon first: the bridge never starts one (D18).
             drop(daemon::connect(paths, false, lang, true)?);
             let program = program()?;
-            let socket = agentlibre_core::daemon::socket_path(runtime);
+            let socket = agentlibre_client::socket_path(runtime);
             start(&program, &listen, store.dir(), &socket)?;
             outln!("{}", tr!(lang, m::BRIDGE_STARTED, url = listen.url()));
             Ok(ExitCode::SUCCESS)

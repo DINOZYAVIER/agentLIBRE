@@ -53,24 +53,24 @@ impl Daemon {
                             .is_ok_and(|workspace| workspace == dir)
                 })
                 .map(|(_, entry)| (Arc::clone(&entry.voice), entry.draft.clone()))
-                .ok_or_else(|| super::error::Error::NoTranscriber { dir: dir.clone() })?
+                .ok_or_else(|| Error::NoTranscriber { dir: dir.clone() })?
         };
         let drafter = if draft {
-            Some(drafter.ok_or(super::error::Error::NoDraft)?)
+            Some(drafter.ok_or(Error::NoDraft)?)
         } else {
             None
         };
-        let source = wire::attached_of(audio).ok_or(super::error::Error::BadAudio)?.source;
+        let source = wire::attached_of(audio).ok_or(Error::BadAudio)?.source;
         let wav = if source.ext.eq_ignore_ascii_case("wav") {
             source.bytes
         } else {
-            crate::media::audio_to_wav(&source.bytes)?
+            agentlibre_core::media::audio_to_wav(&source.bytes)?
         };
         if let Some(drafter) = drafter {
-            return drafter.transcribe(&wav);
+            return drafter.transcribe(&wav).map_err(Error::from);
         }
         voice.warm_up(&mut |_| {})?;
-        voice.transcribe(&wav, None, &mut |_| {})
+        voice.transcribe(&wav, None, &mut |_| {}).map_err(Error::from)
     }
     /// One look at the idle clocks (AGL-120, D2): a server whose clock
     /// passed `idle_stop` with no turn running on it stops — its unit, or
@@ -191,7 +191,7 @@ impl Daemon {
         for (_, engine, dir) in stop {
             let pid = engine.pid();
             engine.shutdown();
-            crate::engine::remove_record(&dir, runtime.as_deref(), Some(pid));
+            agentlibre_core::engine::remove_record(&dir, runtime.as_deref(), Some(pid));
         }
     }
 }

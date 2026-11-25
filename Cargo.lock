@@ -10,6 +10,7 @@ dependencies = [
  "agentlibre-client",
  "agentlibre-common",
  "agentlibre-core",
+ "agentlibre-daemon",
  "agentlibre-forge",
  "agentlibre-proto",
  "agentlibre-surface",
@@ -54,7 +55,6 @@ dependencies = [
 name = "agentlibre-core"
 version = "0.1.0"
 dependencies = [
- "agentlibre-client",
  "agentlibre-common",
  "agentlibre-forge",
  "agentlibre-proto",
@@ -64,6 +64,17 @@ dependencies = [
  "ring",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "agentlibre-daemon"
+version = "0.1.0"
+dependencies = [
+ "agentlibre-client",
+ "agentlibre-common",
+ "agentlibre-core",
+ "agentlibre-forge",
+ "agentlibre-proto",
 ]
 
 [[package]]

@@ -18,6 +18,11 @@ pub(crate) use agentlibre_core::error::Error as CoreError;
 pub enum Error {
     /// An error of agl's core.
     Core(CoreError),
+    /// The daemon's socket, or what it refused, said as the clients say it
+    /// (AGL-131, D5).
+    Client(agentlibre_client::Error),
+    /// `agl daemon` failed (AGL-131, D2).
+    Daemon(agentlibre_daemon::Error),
     /// `agl bridge` and `bridge` lacks `address` or `port` (AGL-083, D20).
     BridgeNotSet { path: PathBuf },
     /// No `agl-bridge` beside `agl` (AGL-083, D18).
@@ -57,19 +62,25 @@ pub enum Error {
     Terminal { source: io::Error },
 }
 
-/// A surface crate's error as the core's, which the terminal's error wraps
-/// (AGL-127, D6) and its sessions still speak.
-pub(crate) fn core_of(error: agentlibre_surface::Error) -> CoreError {
-    match error {
-        agentlibre_surface::Error::Client(error) => error.into(),
-        agentlibre_surface::Error::Common(error) => error.into(),
-        agentlibre_surface::Error::Media(error) => error.into(),
+impl From<agentlibre_surface::Error> for Error {
+    fn from(source: agentlibre_surface::Error) -> Error {
+        match source {
+            agentlibre_surface::Error::Client(error) => Error::Client(error),
+            agentlibre_surface::Error::Common(error) => Error::Core(error.into()),
+            agentlibre_surface::Error::Media(error) => Error::Core(agentlibre_common::error::Error::from(error).into()),
+        }
     }
 }
 
-impl From<agentlibre_surface::Error> for Error {
-    fn from(source: agentlibre_surface::Error) -> Error {
-        Error::Core(core_of(source))
+impl From<agentlibre_client::Error> for Error {
+    fn from(source: agentlibre_client::Error) -> Error {
+        Error::Client(source)
+    }
+}
+
+impl From<agentlibre_daemon::Error> for Error {
+    fn from(source: agentlibre_daemon::Error) -> Error {
+        Error::Daemon(source)
     }
 }
 
@@ -90,7 +101,7 @@ macro_rules! from_core {
     };
 }
 
-from_core!(backend, daemon, engine, function, machine, plane, session);
+from_core!(backend, engine, function, machine, plane, session);
 
 /// The stores crate's errors are the core's, and so the terminal's
 /// (AGL-121, D77).
@@ -184,6 +195,8 @@ impl Error {
     fn text(&self, lang: Lang) -> String {
         match self {
             Error::Core(error) => error.message(lang),
+            Error::Client(error) => agentlibre_surface::client_message(error, lang),
+            Error::Daemon(error) => error.message(lang),
             Error::BridgeNotSet { path } => tr!(lang, BRIDGE_NOT_SET, path = path.display()),
             Error::BridgeProgramMissing { path } => {
                 tr!(lang, BRIDGE_PROGRAM_MISSING, path = path.display())

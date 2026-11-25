@@ -17,31 +17,32 @@ use std::time::{Duration, Instant};
 
 use agentlibre_proto::{self as proto, Ask, Lines, Read, Reply, Request};
 
-use crate::backend::llama::Llama;
-use crate::backend::strata::Strata;
-use crate::backend::{Backend, Message as ChatMessage, Prompt};
+use agentlibre_core::backend::llama::Llama;
+use agentlibre_core::backend::strata::Strata;
+use agentlibre_core::backend::{Backend, Message as ChatMessage, Prompt};
 use agentlibre_common::reasoning::ReasoningLevel;
-use crate::engine::{Consent, Engine, Others, rebind_url, remove_record, systemctl, unit_active, unit_main_pid, unit_name};
-use crate::error::Error;
+use agentlibre_core::engine::{Consent, Engine, Others, rebind_url, remove_record, systemctl, unit_active, unit_main_pid, unit_name};
+use agentlibre_core::error::Error as CoreError;
 use agentlibre_forge::forge;
-use crate::function::Function;
-use crate::grammar::{Expr, Grammar};
+use agentlibre_core::function::Function;
+use agentlibre_core::grammar::{Expr, Grammar};
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_forge::memory::MemoryAction;
 use agentlibre_common::paths::Paths;
-use crate::phase::Observer;
-use crate::plane::{self, Command, Run, Sent, wire};
-use crate::session::Session;
+use agentlibre_core::phase::Observer;
+use agentlibre_core::plane::{self, Command, Run, Sent, wire};
+use agentlibre_core::session::Session;
 use agentlibre_common::settings::{ServerKind, Settings, UserFile};
-use crate::stop::Stop;
+use agentlibre_core::stop::Stop;
 use agentlibre_common::tr;
-use crate::whisper::{Draft, Voice};
+use agentlibre_core::whisper::{Draft, Voice};
 
+pub use error::Error;
 use servers::{Clock, SWEEP_POLL};
 
 
 mod clients;
-pub mod error;
+mod error;
 mod flow;
 mod look;
 mod servers;
@@ -56,7 +57,7 @@ pub fn socket_path(runtime: &Path) -> PathBuf {
 
 /// Serves the planes on the socket until the process ends.
 pub fn serve(paths: Paths) -> Result<(), Error> {
-    let runtime = paths.runtime.clone().ok_or(Error::DaemonNoRuntime)?;
+    let runtime = paths.runtime.clone().ok_or(Error::NoRuntime)?;
     let listener = bind(&runtime)?;
     // The daemon's ear for the wakes its flows wait on (D18, D20).
     let (needs, inbox) = mpsc::channel();
@@ -102,7 +103,7 @@ pub fn serve(paths: Paths) -> Result<(), Error> {
 /// The socket, 0600 in a 0700 directory; a socket that no daemon answers
 /// is taken over, one that answers is another daemon's.
 fn bind(runtime: &Path) -> Result<UnixListener, Error> {
-    let fail = |path: &Path, source: io::Error| Error::Daemon {
+    let fail = |path: &Path, source: io::Error| Error::Socket {
         detail: format!("{}: {source}", path.display()),
     };
     std::fs::DirBuilder::new()
@@ -113,7 +114,7 @@ fn bind(runtime: &Path) -> Result<UnixListener, Error> {
     let path = socket_path(runtime);
     if path.exists() {
         if UnixStream::connect(&path).is_ok() {
-            return Err(error::Error::Running { path }.into());
+            return Err(Error::Running { path });
         }
         std::fs::remove_file(&path).map_err(|source| fail(&path, source))?;
     }

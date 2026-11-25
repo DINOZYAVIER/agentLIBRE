@@ -6,8 +6,8 @@ use super::*;
 
 use agentlibre_common::settings::ProjectFile;
 
-use crate::function::catalog::Catalog;
-use crate::plane::PlaneFile;
+use agentlibre_core::function::catalog::Catalog;
+use agentlibre_core::plane::PlaneFile;
 
 impl Daemon {
     /// The reply to a request of the stores.
@@ -108,7 +108,7 @@ fn function(catalog: &Catalog, verb: proto::FunctionVerb) -> Result<proto::Funct
                 path: shown(catalog.file(&name)?.path),
                 load: Some(proto::FunctionLoad {
                     kind: function.model.kind().name().to_owned(),
-                    model: crate::engine::model_of(&function.model)?,
+                    model: agentlibre_core::engine::model_of(&function.model)?,
                     context: function.model.context,
                 }),
                 name,
@@ -135,7 +135,7 @@ fn function(catalog: &Catalog, verb: proto::FunctionVerb) -> Result<proto::Funct
 mod tests {
     use super::*;
 
-    use crate::daemon::tests::{Client, daemon, open};
+    use crate::tests::{Client, daemon, open};
     use agentlibre_common::testutil::TempDir;
 
     const GOOD: &str = r#"{ agl, ... }: { policy = { system = "s"; initial = "work"; state.work.answer = true; }; model = { format = agl.formats."qwen3.8"; weights = "p.gguf"; context = 4096; }; }"#;
@@ -178,7 +178,7 @@ mod tests {
         let plane = PlaneFile::create(&paths, "work", std::slice::from_ref(&other)).unwrap();
         let sessions = paths.sessions();
         let mut one = Session::create(&sessions, "f", &project).unwrap();
-        one.append(crate::session::Event::User("first line\nsecond".into())).unwrap();
+        one.append(agentlibre_core::session::Event::User("first line\nsecond".into())).unwrap();
         one.rename(&project, "named").unwrap();
         // A file's name sorts by the millisecond.
         thread::sleep(std::time::Duration::from_millis(5));

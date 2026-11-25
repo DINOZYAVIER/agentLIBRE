@@ -237,8 +237,8 @@ fn run(
             // A daemon already answers: agl is served, not broken — it says
             // so and exits 0 (AGL-120, D4), so a unit and a forked process
             // that lose the race for the socket leave no failed unit behind.
-            if let Err(error) = agentlibre_core::daemon::serve(paths) {
-                if let CoreError::DaemonServer(agentlibre_core::daemon::error::Error::Running { path }) = error {
+            if let Err(error) = agentlibre_daemon::serve(paths) {
+                if let agentlibre_daemon::Error::Running { path } = error {
                     println!("{}", tr!(*lang, m::DAEMON_SERVED, path = path.display()));
                     return Ok(ExitCode::SUCCESS);
                 } else {
@@ -401,12 +401,12 @@ fn agent_session(
             },
             &mut |sent| agentlibre_client::give(sent, &mut report),
         )
-        .map_err(|error| Error::from(CoreError::from(error)))?;
+        .map_err(Error::from)?;
     remote.close();
     let turn = done
         .turn
         .expect("a message's turn")
-        .map_err(|text| Error::from(CoreError::Said { text }))?;
+        .map_err(|text| Error::Client(agentlibre_client::Error::Said { text }))?;
     match turn {
         TurnEnd::Answer(text) => {
             outln!("{text}");

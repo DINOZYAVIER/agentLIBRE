@@ -123,7 +123,7 @@ impl Daemon {
                     entry.subscribers.insert(client);
                     Some(Reply::Ok)
                 }
-                None => refused(super::error::Error::NoSession { id }.into()),
+                None => refused(Error::NoSession { id }),
             },
             Request::Say {
                 session,
@@ -189,7 +189,7 @@ impl Daemon {
             Request::Record { session, lines } => {
                 let events = lines
                     .into_iter()
-                    .map(|line| crate::session::Event::Command(wire::command_of(line)))
+                    .map(|line| agentlibre_core::session::Event::Command(wire::command_of(line)))
                     .collect();
                 self.plain(client, &session, Command::Append(events), lang)
             }
@@ -241,7 +241,7 @@ impl Daemon {
                             session,
                         },
                         None => Reply::Refused {
-                            error: Error::from(super::error::Error::NoSession { id: session }).message(lang),
+                            error: Error::NoSession { id: session }.message(lang),
                         },
                     };
                     if let Some(client) = state.clients.get(&client) {
@@ -482,7 +482,7 @@ mod tests {
 
     use super::*;
 
-    use crate::daemon::tests::{Client, daemon};
+    use crate::tests::{Client, daemon};
     use agentlibre_common::testutil::TempDir;
 
     #[test]

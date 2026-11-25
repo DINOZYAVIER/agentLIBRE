@@ -14,4 +14,4 @@ pub mod record;
 pub mod records;
 pub mod words;
 
-pub use error::Error;
+pub use error::{Error, client_message};

@@ -21,7 +21,7 @@ use agentlibre_common::error::Error as CommonError;
 pub const JOURNAL_DIR: &str = "flow";
 
 /// Seconds since the epoch, as the session files keep time.
-pub(crate) fn now() -> u64 {
+pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

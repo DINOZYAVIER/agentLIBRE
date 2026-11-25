@@ -9,7 +9,7 @@ use agentlibre_common::paths::Paths;
 use agentlibre_surface::daemon;
 use agentlibre_proto::{Reply, Request};
 
-use crate::error::{CoreError, Error};
+use crate::error::Error;
 
 pub fn run(session: &str, message: &str, paths: &Paths, cwd: &Path, lang: Lang) -> Result<ExitCode, Error> {
     // No human answers here: a question of the turn waits for whoever opens
@@ -22,7 +22,7 @@ pub fn run(session: &str, message: &str, paths: &Paths, cwd: &Path, lang: Lang) 
         attached: Vec::new(),
         reasoning: None,
     };
-    client.ask(&request, &mut |_| {}).map_err(CoreError::from)?;
+    client.ask(&request, &mut |_| {}).map_err(Error::from)?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -35,7 +35,7 @@ fn id_of(client: &agentlibre_client::Client, key: &str, cwd: &Path) -> Result<St
         plane: None,
         limit: if last { 1 } else { usize::MAX },
     };
-    let Reply::Past { sessions } = client.ask(&request, &mut |_| {}).map_err(CoreError::from)? else {
+    let Reply::Past { sessions } = client.ask(&request, &mut |_| {}).map_err(Error::from)? else {
         return Ok(key.to_owned());
     };
     Ok(sessions

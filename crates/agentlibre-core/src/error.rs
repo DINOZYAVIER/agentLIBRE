@@ -44,13 +44,6 @@ pub enum Error {
     Plane(crate::plane::error::Error),
     /// What the daemon refused, in its words (AGL-076).
     Said { text: String },
-    /// `agl daemon` has no runtime directory for its socket (AGL-076, D7).
-    DaemonNoRuntime,
-    /// The daemon's socket or a connection failed.
-    Daemon { detail: String },
-    /// The daemon's own: its socket taken, a session or a transcriber it
-    /// does not hold, bad audio. Its own type, wrapped (AGL-121, D66).
-    DaemonServer(crate::daemon::error::Error),
     /// The thread of a run ended before it answered: a fault of agl's
     /// (AGL-075, D7).
     PlaneGone,
@@ -72,19 +65,6 @@ pub enum Error {
     /// A memory entry not found or not removed (AGL-060). Its own type,
     /// wrapped (AGL-121, D66).
     Memory(agentlibre_forge::memory::Error),
-}
-
-impl From<agentlibre_client::Error> for Error {
-    /// A client's error as agl's: the daemon, its words, its end
-    /// (AGL-121, D29). The clients' crate has no i18n; agl's words are here.
-    fn from(source: agentlibre_client::Error) -> Error {
-        match source {
-            agentlibre_client::Error::NoRuntime => Error::DaemonNoRuntime,
-            agentlibre_client::Error::Daemon { detail } => Error::Daemon { detail },
-            agentlibre_client::Error::Said { text } => Error::Said { text },
-            agentlibre_client::Error::Gone => Error::PlaneGone,
-        }
-    }
 }
 
 impl From<crate::plane::error::Error> for Error {
@@ -127,13 +107,6 @@ impl From<crate::machine::error::Error> for Error {
     /// The machine's own error as agl's (AGL-121, D66).
     fn from(source: crate::machine::error::Error) -> Error {
         Error::Machine(source)
-    }
-}
-
-impl From<crate::daemon::error::Error> for Error {
-    /// The daemon's own error as agl's (AGL-121, D66).
-    fn from(source: crate::daemon::error::Error) -> Error {
-        Error::DaemonServer(source)
     }
 }
 

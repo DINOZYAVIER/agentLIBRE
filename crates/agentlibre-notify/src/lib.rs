@@ -124,7 +124,9 @@ enum Input {
 pub fn run(paths: &Paths, lang: Lang) -> Result<ExitCode, Error> {
     // The socket and the connection are the clients' crate's (AGL-121, D29).
     let socket = agentlibre_client::socket_path(
-        paths.runtime.as_deref().ok_or(CoreError::DaemonNoRuntime)?,
+        paths.runtime.as_deref().ok_or_else(|| CoreError::Said {
+            text: tr!(lang, m::DAEMON_NO_RUNTIME).to_string(),
+        })?,
     );
     let failed = |error: zbus::Error| Error::Notify {
         detail: error.to_string(),

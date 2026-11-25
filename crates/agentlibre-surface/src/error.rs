@@ -17,19 +17,22 @@ pub enum Error {
     Media(agentlibre_common::media::Error),
 }
 
+/// The message of a client's error in `lang`: the words agl says them in, a
+/// refusal as the daemon said it (AGL-127, D6; AGL-131, D5).
+pub fn client_message(error: &agentlibre_client::Error, lang: Lang) -> String {
+    match error {
+        agentlibre_client::Error::NoRuntime => tr!(lang, m::DAEMON_NO_RUNTIME).to_string(),
+        agentlibre_client::Error::Daemon { detail } => tr!(lang, m::DAEMON_FAILED, detail = detail),
+        agentlibre_client::Error::Said { text } => text.clone(),
+        agentlibre_client::Error::Gone => tr!(lang, m::PLANE_GONE).to_string(),
+    }
+}
+
 impl Error {
-    /// The message of `self` in `lang`: the client's by the words the core
-    /// says them in, a refusal as the daemon said it (AGL-127, D6).
+    /// The message of `self` in `lang`.
     pub fn message(&self, lang: Lang) -> String {
         match self {
-            Error::Client(agentlibre_client::Error::NoRuntime) => {
-                tr!(lang, m::DAEMON_NO_RUNTIME).to_string()
-            }
-            Error::Client(agentlibre_client::Error::Daemon { detail }) => {
-                tr!(lang, m::DAEMON_FAILED, detail = detail)
-            }
-            Error::Client(agentlibre_client::Error::Said { text }) => text.clone(),
-            Error::Client(agentlibre_client::Error::Gone) => tr!(lang, m::PLANE_GONE).to_string(),
+            Error::Client(error) => client_message(error, lang),
             Error::Common(error) => error.message(lang),
             Error::Media(error) => error.message(lang),
         }

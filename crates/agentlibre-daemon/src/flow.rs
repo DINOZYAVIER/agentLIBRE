@@ -1,7 +1,7 @@
 //! The flow's half of the daemon: the wakes, the review's turns, the poke (AGL-121, D28): split off `daemon/mod.rs`.
 
 use super::*;
-use crate::plane::error::Error as PlaneError;
+use agentlibre_core::plane::error::Error as PlaneError;
 
 /// D58's gate (AGL-121): one model turn of the flows at a time over all
 /// planes. A review holds it while it turns; a wake holds it from its
@@ -110,7 +110,7 @@ impl Daemon {
                     handle.post(match verdict {
                         Ok((answer, session)) => Letter::Verdict {
                             flow: review.flow,
-                            event: crate::machine::Event::Verdict {
+                            event: agentlibre_core::machine::Event::Verdict {
                                 check: holder::REVIEW.into(),
                                 answer,
                             },
@@ -241,9 +241,9 @@ impl Daemon {
             review.state,
             review.events.join(" ")
         );
-        session.append(crate::session::Event::User(text))?;
+        session.append(agentlibre_core::session::Event::User(text))?;
         let answer = review_answer(&*backend, &function, &review.events)?;
-        session.append(crate::session::Event::Answer(answer.clone()))?;
+        session.append(agentlibre_core::session::Event::Answer(answer.clone()))?;
         Ok((answer, session.id))
     }
 
@@ -314,7 +314,7 @@ fn review_answer(
     };
     let prompt = function.format.start_step(backend.render(&structured)?, false);
     let generated = backend.generate(
-        &crate::backend::Request {
+        &agentlibre_core::backend::Request {
             prompt: &prompt,
             grammar: Some(&grammar_str),
             stop: &[],
@@ -342,7 +342,7 @@ fn review_answer(
 mod tests {
     use super::*;
 
-    use crate::daemon::tests::{Client, daemon};
+    use crate::tests::{Client, daemon};
     use agentlibre_common::testutil::TempDir;
 
     #[test]
@@ -429,19 +429,19 @@ mod tests {
     /// A server that answers one fixed word, for the review turn's law (D5).
     struct Echo(&'static str);
 
-    impl crate::backend::Backend for Echo {
-        fn render(&self, _prompt: &crate::backend::Prompt) -> Result<String, Error> {
+    impl agentlibre_core::backend::Backend for Echo {
+        fn render(&self, _prompt: &agentlibre_core::backend::Prompt) -> Result<String, agentlibre_core::error::Error> {
             Ok("prompt".into())
         }
         fn generate(
             &self,
-            _request: &crate::backend::Request,
+            _request: &agentlibre_core::backend::Request,
             _on_thinking: &mut dyn FnMut(&str),
             _on_text: &mut dyn FnMut(&str),
-        ) -> Result<crate::backend::Generated, Error> {
-            Ok(crate::backend::Generated {
+        ) -> Result<agentlibre_core::backend::Generated, agentlibre_core::error::Error> {
+            Ok(agentlibre_core::backend::Generated {
                 text: self.0.into(),
-                stop: crate::backend::Stop::End,
+                stop: agentlibre_core::backend::Stop::End,
                 thinking: None,
                 tool_calls: Vec::new(),
                 prompt_tokens: None,
@@ -449,10 +449,10 @@ mod tests {
                 prefill: None,
             })
         }
-        fn count_tokens(&self, text: &str) -> Result<usize, Error> {
+        fn count_tokens(&self, text: &str) -> Result<usize, agentlibre_core::error::Error> {
             Ok(text.len())
         }
-        fn context_size(&self) -> Result<usize, Error> {
+        fn context_size(&self) -> Result<usize, agentlibre_core::error::Error> {
             Ok(16384)
         }
         fn health(&self) -> Option<u16> {
@@ -466,7 +466,7 @@ mod tests {
     #[test]
     fn a_review_answer_outside_the_names_is_no_verdict() {
         // D5, D19: the machine's names are law; prose is not a verdict.
-        use crate::function::Function;
+        use agentlibre_core::function::Function;
         let function = Function::load(&[Path::new("/none")], "fixture-minimal").unwrap();
         let events = ["ok".to_string(), "broken".to_string()];
         assert_eq!(review_answer(&Echo("ok"), &function, &events).unwrap(), "ok");

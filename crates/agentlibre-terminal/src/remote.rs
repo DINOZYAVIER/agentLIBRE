@@ -11,7 +11,7 @@ use agentlibre_client::Remote;
 use agentlibre_proto::{self as proto, Ask, Reply, Request};
 
 use agentlibre_common::reasoning::ReasoningLevel;
-use crate::error::CoreError as Error;
+use crate::error::Error;
 use agentlibre_common::i18n::Lang;
 use crate::interrupt;
 use agentlibre_common::paths::Paths;
@@ -33,7 +33,7 @@ pub struct Opening<'a> {
 /// plain terminal when there is one (D11).
 pub fn open(paths: &Paths, opening: Opening, lang: Lang) -> Result<(Arc<Remote>, proto::Opened), Error> {
     let human = agentlibre_common::tty::is_interactive();
-    let client = agentlibre_surface::daemon::connect(paths, human, lang, true).map_err(crate::error::core_of)?;
+    let client = agentlibre_surface::daemon::connect(paths, human, lang, true)?;
     let request = Request::Open(proto::Open {
         dir: opening.cwd.to_string_lossy().into_owned(),
         plane: opening.plane.map(str::to_owned),
@@ -56,9 +56,9 @@ pub fn open(paths: &Paths, opening: Opening, lang: Lang) -> Result<(Arc<Remote>,
         _ => {}
     })?;
     let Reply::Opened(opened) = reply else {
-        return Err(Error::Daemon {
+        return Err(Error::Client(agentlibre_client::Error::Daemon {
             detail: format!("an unexpected reply: {reply:?}"),
-        });
+        }));
     };
     let mut remote = Remote::new(client, opened.session.id.clone());
     // A question of a turn of `-p` is asked on the plain terminal, as the

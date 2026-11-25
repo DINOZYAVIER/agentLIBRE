@@ -11,7 +11,6 @@ description = "agentLIBRE core: the agent, the Functions, the backends, the forg
 testutil = ["agentlibre-common/testutil"]
 
 [dependencies]
-agentlibre-client = { path = "../agentlibre-client" }
 agentlibre-common = { path = "../agentlibre-common" }
 agentlibre-forge = { path = "../agentlibre-forge" }
 agentlibre-proto = { path = "../agentlibre-proto" }

@@ -15,7 +15,6 @@ use agentlibre_common::media::{Pending, Source};
 use agentlibre_surface::commands::{self, Memory, look_of, memory};
 use crate::cli::report::StderrReport;
 use crate::error::Error;
-use crate::error::CoreError;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::reasoning::ReasoningLevel;
 use crate::interrupt;
@@ -235,7 +234,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
 
 /// A client's error as agl's: what ends the session.
 fn ended(error: agentlibre_client::Error) -> Error {
-    Error::from(CoreError::from(error))
+    Error::from(error)
 }
 
 /// What a slash command said; a refusal of the daemon is the error of its
@@ -243,7 +242,7 @@ fn ended(error: agentlibre_client::Error) -> Error {
 fn of_said(done: Done) -> Result<Text, Error> {
     done.said
         .expect("a command's saying")
-        .map_err(|text| Error::from(CoreError::Said { text }))
+        .map_err(|text| Error::Client(agentlibre_client::Error::Said { text }))
 }
 
 /// `path` without one pair of quotes, as a shell or a file manager gives it.
@@ -295,7 +294,7 @@ impl Record {
             record_error,
         } = said;
         if let Some(text) = record_error {
-            return Err(CoreError::Said { text }.into());
+            return Err(Error::Client(agentlibre_client::Error::Said { text }));
         }
         let mut answer = false;
         for told in lines {

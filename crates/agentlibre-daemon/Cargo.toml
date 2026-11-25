@@ -1,0 +1,18 @@
+[package]
+name = "agentlibre-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "agentLIBRE's daemon: it holds the runs of the sessions its clients open and serves them on its one socket, in the protocol (AGL-076, AGL-131)"
+
+[dependencies]
+agentlibre-client = { path = "../agentlibre-client" }
+agentlibre-common = { path = "../agentlibre-common" }
+agentlibre-core = { path = "../agentlibre-core" }
+agentlibre-forge = { path = "../agentlibre-forge" }
+agentlibre-proto = { path = "../agentlibre-proto" }
+
+[dev-dependencies]
+agentlibre-common = { path = "../agentlibre-common", features = ["testutil"] }
+agentlibre-core = { path = "../agentlibre-core", features = ["testutil"] }

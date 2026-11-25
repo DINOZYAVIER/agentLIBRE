@@ -44,7 +44,6 @@ use agentlibre_common::paths::Paths;
 use agentlibre_surface::commands::{Memory, look_of, memory};
 use agentlibre_common::tty::is_yes;
 use crate::error::Error;
-use crate::error::CoreError;
 use agentlibre_surface::words as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::interrupt;
@@ -1219,7 +1218,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     control.lock().media_counts = opened.session.media;
     // What the session holds, and what its turn is writing when it is
     // another client's (AGL-126, D10).
-    let (events, transitions, writing) = remote.past().map_err(CoreError::from)?;
+    let (events, transitions, writing) = remote.past()?;
     // The live draft engine of the dictation (AGL-122, D5), when the daemon
     // has a draft server set: it transcribes the chunks there (AGL-127, D4).
     let draft: Option<Arc<dyn DraftEngine>> = opened.drafts.then(|| {
@@ -1412,7 +1411,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             Ok(done) => done,
             Err(agentlibre_client::Error::Gone) => return None,
             Err(error) => {
-                let text = Error::from(CoreError::from(error)).message(lang);
+                let text = Error::from(error).message(lang);
                 let (turn, said) = if turn { (Some(Err(text)), None) } else { (None, Some(Err(text))) };
                 Done {
                     turn,
@@ -1611,7 +1610,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         Some(Err(text)) => Err(text),
                         None => Ok(()),
                     },
-                    None => Err(CoreError::PlaneGone.message(lang)),
+                    None => Err(Error::Client(agentlibre_client::Error::Gone).message(lang)),
                 };
                 match found {
                     Ok(()) => {
@@ -1732,7 +1731,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     voice.cancel();
     dock.finish();
     if gone {
-        return Err(CoreError::PlaneGone.into());
+        return Err(Error::Client(agentlibre_client::Error::Gone));
     }
     Ok(end)
 }
@@ -1841,7 +1840,7 @@ mod tests {
             if self.0.not_ready.load(Ordering::SeqCst) {
                 // What the daemon says of a whisper that is not set, as the
                 // surface hears it: a refusal with the words.
-                let text = CoreError::Whisper(crate::whisper::Error::NotSet {
+                let text = crate::error::CoreError::Whisper(crate::whisper::Error::NotSet {
                     user_path: "/c/settings.nix".into(),
                     project_path: "/d/settings.nix".into(),
                 })
