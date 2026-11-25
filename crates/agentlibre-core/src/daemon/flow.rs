@@ -167,6 +167,9 @@ impl Daemon {
         };
         if entry.commands.send(command).is_ok() {
             entry.busy = true;
+            // Of no client, and in its place among the commands that wait
+            // for their end (D12).
+            entry.origins.push_back(NO_CLIENT);
             // The pair of D22: the end of this session's turn is the flow's
             // `turn.end`, no other's.
             state

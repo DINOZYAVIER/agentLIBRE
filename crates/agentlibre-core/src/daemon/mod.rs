@@ -229,6 +229,9 @@ impl State {
 
 /// The idle clock of a server (AGL-120, D2): the seconds of no turn that
 /// stop it, the last turn's end, how to stop it (its unit, or the child
+/// Who a command of the daemon's own is from: no client has this number.
+const NO_CLIENT: u64 = 0;
+
 struct Client {
     out: Arc<Mutex<UnixStream>>,
     human: bool,
