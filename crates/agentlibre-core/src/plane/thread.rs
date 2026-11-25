@@ -227,7 +227,17 @@ impl Run {
                 Ok(())
             }
             Err(error) => {
-                observer.end(PhaseEvent::Failed, &mut *forward);
+                // The same telling as a turn's (AGL-135, D2): a server that
+                // does not come up stops, the human's Ctrl-C does not.
+                observer.end(
+                    match &error {
+                        Error::Common(agentlibre_common::error::Error::Interrupted) => {
+                            PhaseEvent::Failed
+                        }
+                        _ => PhaseEvent::Stop(crate::session::StopReason::ServerError),
+                    },
+                    &mut *forward,
+                );
                 Err(error)
             }
         }

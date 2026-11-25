@@ -634,6 +634,35 @@ fn a_failed_action_request_after_a_thinking_keeps_the_thinking_and_the_grammar()
 }
 
 #[test]
+fn a_servers_failure_tells_the_wire_a_stop_not_a_failure() {
+    // AGL-135, D1: what the surfaces are told is `Stop(server_error)`, not
+    // `Failed`: that is what draws the critical card with Continue (AGL-074,
+    // D10) when the model's server dies.
+    #[derive(Default)]
+    struct Wire(Vec<String>);
+
+    impl Sink for Wire {
+        fn send(&mut self, report: Report) {
+            if let Report::Transition(transition) = report {
+                self.0.push(transition.event.name());
+            }
+        }
+    }
+
+    let dir = TempDir::new();
+    let minimal = Function::load(&[Path::new("/none"), Path::new("/none")], "fixture-minimal").unwrap();
+    let script = Script::new(&[("!unreachable", Stop::End)]);
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    let mut wire = Wire::default();
+    let mut observer = Observer::new();
+    observer.attach(&session);
+    let end = agent(&minimal, &script, &mut session, &dir, None)
+        .turn_observed("Say hello", None, &mut wire, &mut observer);
+    assert!(matches!(end, Err(crate::error::Error::Backend(crate::backend::error::Error::ServerUnreachable { .. }))), "{end:?}");
+    assert_eq!(wire.0.last().map(String::as_str), Some("stop_server_error"));
+}
+
+#[test]
 fn a_call_then_an_answer() {
     let dir = TempDir::new();
     let minimal = Function::load(&[Path::new("/none"), Path::new("/none")], "fixture-minimal").unwrap();

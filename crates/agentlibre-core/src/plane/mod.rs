@@ -658,7 +658,18 @@ impl Run {
                 };
                 let _ = self.session.append(message);
                 let _ = self.session.append(met);
-                observer.end(PhaseEvent::Failed, &mut *surface);
+                // A server that does not come up stops the turn as its own
+                // failure, told to the surfaces as one (AGL-135, D2); the
+                // human's Ctrl-C stays `Failed`, no card for it.
+                observer.end(
+                    match &error {
+                        Error::Common(agentlibre_common::error::Error::Interrupted) => {
+                            PhaseEvent::Failed
+                        }
+                        _ => PhaseEvent::Stop(crate::session::StopReason::ServerError),
+                    },
+                    &mut *surface,
+                );
                 surface.over();
                 Err(error)
             }

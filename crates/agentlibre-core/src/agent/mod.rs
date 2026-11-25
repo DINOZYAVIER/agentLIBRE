@@ -160,6 +160,11 @@ impl Agent<'_> {
         match &end {
             Ok(TurnEnd::Answer(_)) => {}
             Ok(TurnEnd::Stopped(reason)) => reports.end(PhaseEvent::Stop(*reason)),
+            // A server's failure is a stop of its own, told to the surfaces
+            // as one (AGL-135, D1).
+            Err(error) if Self::server_failure(error) => {
+                reports.end(PhaseEvent::Stop(StopReason::ServerError))
+            }
             Err(_) => reports.end(PhaseEvent::Failed),
         }
         end
@@ -193,15 +198,7 @@ impl Agent<'_> {
                 Ok(Some(end)) => return Ok(end),
                 Ok(None) => continue,
                 Err(Error::Common(agentlibre_common::error::Error::Interrupted)) => StopReason::Interrupted,
-                Err(
-                    error @ Error::Backend(
-                        BackendError::ServerUnreachable { .. }
-                        | BackendError::ServerCertificate { .. }
-                        | BackendError::ServerStatus { .. }
-                        | BackendError::ServerReply { .. }
-                        | BackendError::OutsideGrammar(_),
-                    ),
-                ) => {
+                Err(error) if Self::server_failure(&error) => {
                     self.session.append(Event::Stop(StopReason::ServerError))?;
                     return Err(error);
                 }
@@ -210,6 +207,21 @@ impl Agent<'_> {
             self.session.append(Event::Stop(stop))?;
             return Ok(TurnEnd::Stopped(stop));
         }
+    }
+
+    /// The backend errors that stop the turn as the server's failure
+    /// (AGL-135, D1, D5): the list `run_turn` and the phase's end share.
+    pub(crate) fn server_failure(error: &Error) -> bool {
+        matches!(
+            error,
+            Error::Backend(
+                BackendError::ServerUnreachable { .. }
+                    | BackendError::ServerCertificate { .. }
+                    | BackendError::ServerStatus { .. }
+                    | BackendError::ServerReply { .. }
+                    | BackendError::OutsideGrammar(_),
+            )
+        )
     }
 
     fn enter(&mut self, state: &str, report: &mut Reports<'_>) -> Result<(), Error> {
