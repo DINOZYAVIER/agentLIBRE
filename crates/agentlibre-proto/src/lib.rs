@@ -15,6 +15,7 @@ use std::io::{self, BufRead, Write};
 use serde::{Deserialize, Serialize};
 
 pub mod base64;
+mod names;
 mod wire;
 
 pub use wire::*;
