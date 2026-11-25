@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agentLIBRE"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "agentlibre-bridge",
  "agentlibre-common",
@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "agentlibre-bridge"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "agentlibre-proto",
  "hex",
@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "agentlibre-client"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "agentlibre-proto",
  "libc",
@@ -42,7 +42,7 @@ dependencies = [
 
 [[package]]
 name = "agentlibre-common"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "libc",
  "serde_json",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "agentlibre-core"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "agentlibre-client",
  "agentlibre-common",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "agentlibre-forge"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "agentlibre-common",
  "libc",
@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "agentlibre-notify"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "agentlibre-client",
  "agentlibre-common",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "agentlibre-proto"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "base64",
  "serde",
