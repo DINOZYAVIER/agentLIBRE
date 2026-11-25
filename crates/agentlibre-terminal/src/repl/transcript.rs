@@ -1551,7 +1551,8 @@ mod tests {
             assert_eq!(row(&printed, "OK"), "OK · Compacting <1s");
         }
         mock.printed.lock().unwrap().clear();
-        replay(&presenter, 
+        replay(
+            &presenter,
             &[Event::Compact {
                 summary: "the summary".into(),
                 question: None,

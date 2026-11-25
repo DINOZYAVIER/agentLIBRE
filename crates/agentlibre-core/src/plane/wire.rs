@@ -1,7 +1,6 @@
-//! A plane's reports, events and ends on the wire and back (AGL-076, D2):
-//! the core's types mapped to the protocol's, which has no dependency on
-//! the core, and the protocol's back to the core's for a surface that
-//! draws them with the core.
+//! A plane's reports, events and ends on the wire (AGL-076, D2): the core's
+//! types mapped to the protocol's, which has no dependency on the core. Back
+//! come only what a client's command carries (AGL-130, D11).
 
 use agentlibre_proto as wire;
 

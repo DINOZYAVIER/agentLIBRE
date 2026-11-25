@@ -148,7 +148,6 @@ impl Text {
     }
 }
 
-/// The `Event` of a written memory entry (AGL-047, D5).
 /// What to tell after `/compact`; a summary shows itself (D140).
 fn compact_notice(
     result: Result<Compaction, Error>,
@@ -172,6 +171,7 @@ fn compact_notice(
     }
 }
 
+/// The `Event` of a written memory entry (AGL-047, D5).
 fn written(write: &Write) -> Event {
     Event::Memory {
         name: write.name.clone(),
