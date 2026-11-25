@@ -1,4 +1,6 @@
-# agentLIBRE
+<p align="center"><img src="assets/agl.png" width="160" alt="agL"></p>
+
+<h1 align="center">agentLIBRE</h1>
 
 agentLIBRE is a local-first agentic system. That's where I put everything needed for running agentic AI on your computer.
 
