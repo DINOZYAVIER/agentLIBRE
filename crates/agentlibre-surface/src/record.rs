@@ -14,7 +14,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::error::Error;
+use crate::Error;
 
 /// How long a recording that is stopped is waited for to finish its file.
 const FINISH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -55,7 +55,7 @@ pub trait Recording: Send {
 /// Starts recording the default source for at most `limit` seconds (D4,
 /// D5).
 pub fn start(limit: u32) -> Result<Box<dyn Recording>, Error> {
-    let ffmpeg = agentlibre_common::programs::program("ffmpeg")?;
+    let ffmpeg = agentlibre_common::programs::program("ffmpeg").map_err(agentlibre_common::error::Error::from)?;
     Ffmpeg::start(ffmpeg.as_os_str(), limit).map(|recording| Box::new(recording) as Box<dyn Recording>)
 }
 
@@ -63,7 +63,7 @@ pub fn start(limit: u32) -> Result<Box<dyn Recording>, Error> {
 /// `poll_chunk` gives the speech chunks as they end, `stop` — the whole
 /// recording.
 pub fn start_chunked(limit: u32, vad: Vad) -> Result<Box<dyn Recording>, Error> {
-    let ffmpeg = agentlibre_common::programs::program("ffmpeg")?;
+    let ffmpeg = agentlibre_common::programs::program("ffmpeg").map_err(agentlibre_common::error::Error::from)?;
     Ffmpeg::start_chunked(ffmpeg.as_os_str(), limit, vad)
         .map(|recording| Box::new(recording) as Box<dyn Recording>)
 }
@@ -792,7 +792,7 @@ mod tests {
         let mut tries = 0;
         loop {
             match Ffmpeg::start(fake.0.as_os_str(), limit) {
-                Err(Error::Media(crate::media::Error::Common(agentlibre_common::media::Error::Ffmpeg { detail }))) if detail.contains("busy") && tries < 50 => {
+                Err(Error::Media(agentlibre_common::media::Error::Ffmpeg { detail })) if detail.contains("busy") && tries < 50 => {
                     tries += 1;
                     thread::sleep(Duration::from_millis(20));
                 }
@@ -878,9 +878,9 @@ mod tests {
     fn an_ffmpeg_that_fails_at_once_says_why_and_a_missing_one_is_an_error() {
         let fake = Fake::new("fail", "echo 'default: Connection refused' >&2\nexit 1");
         let error = start_fake(&fake, 60).map(|_| ()).unwrap_err();
-        assert!(matches!(&error, Error::Media(crate::media::Error::Common(agentlibre_common::media::Error::Ffmpeg { detail })) if detail.contains("Connection refused")));
+        assert!(matches!(&error, Error::Media(agentlibre_common::media::Error::Ffmpeg { detail }) if detail.contains("Connection refused")));
         let missing = Ffmpeg::start("/no/such/ffmpeg".as_ref(), 60).map(|_| ()).unwrap_err();
-        assert!(matches!(missing, Error::Media(crate::media::Error::Common(agentlibre_common::media::Error::Ffmpeg { .. }))));
+        assert!(matches!(missing, Error::Media(agentlibre_common::media::Error::Ffmpeg { .. })));
     }
 
     #[test]

@@ -1239,8 +1239,8 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     let voice = Arc::new(VoiceInput::new(
         dock.clone(),
         dictation,
-        Box::new(crate::record::start),
-        Box::new(|limit| crate::record::start_chunked(limit, crate::record::Vad::default())),
+        Box::new(agentlibre_surface::record::start),
+        Box::new(|limit| agentlibre_surface::record::start_chunked(limit, agentlibre_surface::record::Vad::default())),
         draft,
         repl.max_record_seconds,
         lang,
@@ -1809,11 +1809,11 @@ mod tests {
 
     struct FakeRecording(Arc<Fake>);
 
-    impl crate::record::Recording for FakeRecording {
+    impl agentlibre_surface::record::Recording for FakeRecording {
         fn finished(&mut self) -> bool {
             self.0.ended.load(Ordering::SeqCst)
         }
-        fn stop(self: Box<Self>) -> Result<Vec<u8>, CoreError> {
+        fn stop(self: Box<Self>) -> Result<Vec<u8>, agentlibre_surface::Error> {
             self.0.log.lock().unwrap().push("stop".into());
             Ok(b"WAV".to_vec())
         }

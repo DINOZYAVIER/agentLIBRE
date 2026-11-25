@@ -104,6 +104,7 @@ dependencies = [
  "agentlibre-client",
  "agentlibre-common",
  "agentlibre-proto",
+ "libc",
 ]
 
 [[package]]

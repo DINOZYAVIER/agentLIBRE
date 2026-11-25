@@ -57,6 +57,22 @@ pub enum Error {
     Terminal { source: io::Error },
 }
 
+/// A surface crate's error as the core's, for what still speaks the core's
+/// until the dictation is the surface's (AGL-127, D6).
+pub(crate) fn core_of(error: agentlibre_surface::Error) -> CoreError {
+    match error {
+        agentlibre_surface::Error::Client(error) => error.into(),
+        agentlibre_surface::Error::Common(error) => error.into(),
+        agentlibre_surface::Error::Media(error) => error.into(),
+    }
+}
+
+impl From<agentlibre_surface::Error> for Error {
+    fn from(source: agentlibre_surface::Error) -> Error {
+        Error::Core(core_of(source))
+    }
+}
+
 impl From<CoreError> for Error {
     fn from(source: CoreError) -> Error {
         Error::Core(source)

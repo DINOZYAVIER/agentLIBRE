@@ -7,5 +7,6 @@
 pub mod attach;
 pub mod clipboard;
 mod error;
+pub mod record;
 
 pub use error::Error;

@@ -12,6 +12,7 @@ description = "What a client has because it runs on the human's own computer, an
 agentlibre-client = { path = "../agentlibre-client" }
 agentlibre-common = { path = "../agentlibre-common" }
 agentlibre-proto = { path = "../agentlibre-proto" }
+libc = "0.2"
 
 [dev-dependencies]
 agentlibre-common = { path = "../agentlibre-common", features = ["testutil"] }

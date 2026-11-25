@@ -20,7 +20,7 @@ use super::Notice;
 use crate::whisper::{Dictation, Draft};
 use crate::error::CoreError as Error;
 use agentlibre_common::i18n::{Lang, m};
-use crate::record::Recording;
+use agentlibre_surface::record::Recording;
 use crate::theme::Theme;
 use agentlibre_common::tr;
 
@@ -29,7 +29,7 @@ use agentlibre_common::tr;
 const WATCH: Duration = Duration::from_millis(100);
 
 /// Starts a recording of at most the given number of seconds.
-pub type Recorder = Box<dyn Fn(u32) -> Result<Box<dyn Recording>, Error> + Send + Sync>;
+pub type Recorder = Box<dyn Fn(u32) -> Result<Box<dyn Recording>, agentlibre_surface::Error> + Send + Sync>;
 
 /// Queues an auto-sent transcript (AGL-123, D1).
 pub type Sender = Arc<dyn Fn(String) + Send + Sync>;
@@ -538,7 +538,7 @@ impl VoiceInput {
         // The last piece of the recording joins the rest (D12); the
         // whole WAV is kept for the answer of the fallback pass.
         let tail = recording.take_final_tail();
-        let wav = recording.stop()?;
+        let wav = recording.stop().map_err(crate::error::core_of)?;
         if final_worker.is_some() && (final_sent > 0 || tail.is_some()) && !final_failed {
             let fw = final_worker.take().unwrap();
             let mut pending = final_sent;

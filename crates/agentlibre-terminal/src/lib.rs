@@ -18,7 +18,6 @@ pub(crate) use agentlibre_core::{
     function,
     i18n,
     plane,
-    record,
     records,
     session,
     status,
