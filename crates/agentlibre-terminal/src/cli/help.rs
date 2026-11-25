@@ -5,7 +5,7 @@ use crate::cli::args::HelpTopic;
 use agentlibre_common::i18n::{Lang, Msg, m};
 
 /// The usage and the section of each command, in the order of the help.
-const COMMANDS: [(HelpTopic, Msg, Msg); 11] = [
+const COMMANDS: [(HelpTopic, Msg, Msg); 12] = [
     (HelpTopic::Init, m::HELP_INIT_USAGE, m::HELP_INIT),
     (HelpTopic::Server, m::HELP_SERVER_USAGE, m::HELP_SERVER),
     (HelpTopic::Function, m::HELP_FUNCTION_USAGE, m::HELP_FUNCTION),
@@ -13,6 +13,7 @@ const COMMANDS: [(HelpTopic, Msg, Msg); 11] = [
     (HelpTopic::Memory, m::HELP_MEMORY_USAGE, m::HELP_MEMORY),
     (HelpTopic::Plane, m::HELP_PLANE_USAGE, m::HELP_PLANE),
     (HelpTopic::Session, m::HELP_SESSION_USAGE, m::HELP_SESSION),
+    (HelpTopic::Send, m::HELP_SEND_USAGE, m::HELP_SEND),
     (HelpTopic::Daemon, m::HELP_DAEMON_USAGE, m::HELP_DAEMON),
     (HelpTopic::Notify, m::HELP_NOTIFY_USAGE, m::HELP_NOTIFY),
     (HelpTopic::Bridge, m::HELP_BRIDGE_USAGE, m::HELP_BRIDGE),

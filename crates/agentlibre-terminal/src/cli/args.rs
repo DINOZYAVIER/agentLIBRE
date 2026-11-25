@@ -42,6 +42,9 @@ pub enum Command {
     InPlane { plane: String, command: Box<Command> },
     /// `agl daemon`: the planes served on the socket (AGL-076, D6).
     Daemon,
+    /// `agl send <session> <message>`: posted into a session, and left to it
+    /// (AGL-125, D4, D5).
+    Send { session: String, message: String },
     /// `agl notify`: the running sessions told on the desktop (AGL-074,
     /// D2).
     Notify,
@@ -61,6 +64,7 @@ pub enum HelpTopic {
     Memory,
     Plane,
     Session,
+    Send,
     Daemon,
     Notify,
     Bridge,
@@ -310,6 +314,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         Some("memory") => HelpTopic::Memory,
         Some("plane") => HelpTopic::Plane,
         Some("session") => HelpTopic::Session,
+        Some("send") => HelpTopic::Send,
         Some("daemon") => HelpTopic::Daemon,
         Some("notify") => HelpTopic::Notify,
         Some("bridge") => HelpTopic::Bridge,
@@ -338,6 +343,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Command, Error>
         }
         HelpTopic::Plane => plane_args(args),
         HelpTopic::Session => session_args(args),
+        HelpTopic::Send => send_args(args),
         HelpTopic::Daemon => daemon_args(args),
         HelpTopic::Notify => notify_args(args),
         HelpTopic::Bridge => bridge_args(args),
@@ -387,6 +393,24 @@ fn daemon_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Erro
     match args.next() {
         None => Ok(Command::Daemon),
         Some(other) => Err(Error::UnknownOption(text(other)?)),
+    }
+}
+
+/// `agl send <session> <message>` (AGL-125, D4, D5).
+fn send_args(mut args: impl Iterator<Item = OsString>) -> Result<Command, Error> {
+    let mut value = |name: &str| {
+        args.next()
+            .ok_or_else(|| Error::MissingValue(name.into()))
+            .and_then(text)
+    };
+    let session = value("send")?;
+    if matches!(session.as_str(), "-h" | "--help") {
+        return Err(Error::UnknownOption(session));
+    }
+    let message = value(&session)?;
+    match args.next() {
+        Some(extra) => Err(Error::UnknownOption(text(extra)?)),
+        None => Ok(Command::Send { session, message }),
     }
 }
 
@@ -637,6 +661,23 @@ mod tests {
             parse_strs(&["plane", "flow", "walk"]),
             Err(Error::UnknownOption(word)) if word == "walk"
         ));
+    }
+
+    #[test]
+    fn a_message_is_sent_into_a_session() {
+        // AGL-125, D5.
+        assert_eq!(
+            parse_strs(&["send", "gemma grammar", "go on"]).unwrap(),
+            Command::Send {
+                session: "gemma grammar".into(),
+                message: "go on".into(),
+            }
+        );
+        assert!(matches!(parse_strs(&["send", "name"]), Err(Error::MissingValue(_))));
+        for help in [&["send"][..], &["send", "--help"]] {
+            assert_eq!(parse_strs(help).unwrap(), Command::Help(HelpTopic::Send));
+        }
+        assert!(matches!(parse_strs(&["send", "a", "b", "c"]), Err(Error::UnknownOption(_))));
     }
 
     #[test]

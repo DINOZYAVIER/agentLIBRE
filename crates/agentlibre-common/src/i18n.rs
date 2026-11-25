@@ -520,7 +520,34 @@ Memory (the entries of the project, `memory/` of its store):
                                  нічим його не повернути",
     };
 
-    /// The usage of `agl session`.
+    /// The usage of `agl send` (AGL-125, D5).
+    pub const HELP_SEND_USAGE: Msg = Msg {
+        en: "agl send <id|name|last> <message>",
+        uk: "agl send <id|назва|last> <повідомлення>",
+    };
+
+    /// The section of `agl send` in the help (AGL-125, D5).
+    pub const HELP_SEND: Msg = Msg {
+        en: "\
+Sending (a message into a session, which lives on its own):
+  send <id|name|last> <message>  post the message into the session and exit;
+                                 its turn runs in the daemon, which loads the
+                                 session and starts the server of its model
+                                 when they are not up; the answer is in the
+                                 session for whoever opens it next
+  agl -p <message> --resume <id|name|last>
+                                 post it and wait for the answer",
+        uk: "\
+Надсилання (повідомлення в сесію, яка живе сама):
+  send <id|назва|last> <повідомлення>
+                                 надіслати повідомлення в сесію й вийти; хід
+                                 виконує демон: завантажує сесію та запускає
+                                 сервер її моделі, якщо вони не працюють;
+                                 відповідь чекає в сесії того, хто її відкриє
+  agl -p <повідомлення> --resume <id|назва|last>
+                                 надіслати й дочекатися відповіді",
+    };
+
     /// The usage of `agl daemon` (AGL-076, D6).
     pub const HELP_DAEMON_USAGE: Msg = Msg {
         en: "agl daemon",
