@@ -26,6 +26,7 @@ agentlibre-common = { path = "../agentlibre-common" }
 agentlibre-core = { path = "../agentlibre-core" }
 agentlibre-forge = { path = "../agentlibre-forge" }
 agentlibre-proto = { path = "../agentlibre-proto" }
+agentlibre-surface = { path = "../agentlibre-surface" }
 libc = "0.2"
 pulldown-cmark = { version = "0.13", default-features = false }
 qrcode = { version = "0.14.1", default-features = false }

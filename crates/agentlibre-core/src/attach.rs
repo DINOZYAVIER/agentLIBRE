@@ -13,34 +13,9 @@ pub trait Transcriber {
     fn transcribe(&self, source: &Source, say: &mut dyn FnMut(&str)) -> Result<String, Error>;
 }
 
-/// The number the next medium of `kind` gets: after the media the session
-/// holds and those waiting to be sent (D21).
-pub fn next_number(session: &Session, pending: &[Pending], kind: Kind) -> u32 {
-    session.next_media_number(kind)
-        + pending.iter().filter(|p| p.source.kind == kind).count() as u32
-}
-
-/// Adds `source` to `pending` and returns its placeholder.
-pub fn add(session: &Session, pending: &mut Vec<Pending>, source: Source) -> String {
-    add_counted(&media_counts(session), pending, source)
-}
-
 /// The media of each kind the session holds, in the order of [`Kind::ALL`].
 pub fn media_counts(session: &Session) -> [u32; 3] {
     Kind::ALL.map(|kind| session.next_media_number(kind) - 1)
-}
-
-/// [`add`] after `counts` media of each kind the session holds, in the
-/// order of [`Kind::ALL`]: for a surface that holds what its plane told it.
-pub fn add_counted(counts: &[u32; 3], pending: &mut Vec<Pending>, source: Source) -> String {
-    let index = Kind::ALL.iter().position(|kind| *kind == source.kind).unwrap_or(0);
-    let number = counts[index]
-        + pending.iter().filter(|p| p.source.kind == source.kind).count() as u32
-        + 1;
-    let item = Pending { number, source };
-    let placeholder = item.placeholder();
-    pending.push(item);
-    placeholder
 }
 
 /// Stores the media of `pending` that `text` names; the others are
@@ -79,15 +54,6 @@ pub fn store(
         session.store_media(&item.source, item.number, transcript)?;
     }
     Ok(())
-}
-
-/// The placeholders and the message: `[Image#1] [Audio#1] message` (D18).
-pub fn with_placeholders(placeholders: &[String], message: &str) -> String {
-    if placeholders.is_empty() {
-        message.to_owned()
-    } else {
-        format!("{} {message}", placeholders.join(" "))
-    }
 }
 
 #[cfg(test)]
@@ -154,24 +120,16 @@ mod tests {
         }
     }
 
-    fn session(dir: &TempDir) -> Session {
-        Session::create(&dir.0.join("s"), "f", &dir.0).unwrap()
+    /// Adds `source` to `pending`, numbered after the session's media and
+    /// those waiting (a surface's `add_counted`, by hand).
+    fn add(session: &Session, pending: &mut Vec<Pending>, source: Source) {
+        let number = session.next_media_number(source.kind)
+            + pending.iter().filter(|p| p.source.kind == source.kind).count() as u32;
+        pending.push(Pending { number, source });
     }
 
-    #[test]
-    fn the_numbers_follow_the_session_and_the_pending_media_by_kind() {
-        let dir = TempDir::new();
-        let mut session = session(&dir);
-        let mut pending = Vec::new();
-        assert_eq!(add(&session, &mut pending, source(Kind::Image, "a.png")), "[Image#1]");
-        assert_eq!(add(&session, &mut pending, source(Kind::Image, "b.png")), "[Image#2]");
-        assert_eq!(add(&session, &mut pending, source(Kind::Audio, "v.wav")), "[Audio#1]");
-        // The session already holds one image: the next is the second.
-        session.store_media(&source(Kind::Image, "old.png"), 1, None).unwrap();
-        let mut more = Vec::new();
-        assert_eq!(add(&session, &mut more, source(Kind::Image, "c.png")), "[Image#2]");
-        assert_eq!(with_placeholders(&["[Image#1]".into(), "[Audio#1]".into()], "hi"), "[Image#1] [Audio#1] hi");
-        assert_eq!(with_placeholders(&[], "hi"), "hi");
+    fn session(dir: &TempDir) -> Session {
+        Session::create(&dir.0.join("s"), "f", &dir.0).unwrap()
     }
 
     #[test]

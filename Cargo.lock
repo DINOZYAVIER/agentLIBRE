@@ -12,6 +12,7 @@ dependencies = [
  "agentlibre-core",
  "agentlibre-forge",
  "agentlibre-proto",
+ "agentlibre-surface",
  "libc",
  "pulldown-cmark",
  "qrcode",

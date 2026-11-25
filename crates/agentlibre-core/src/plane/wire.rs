@@ -257,17 +257,6 @@ pub fn command_of(line: wire::CommandLine) -> CommandRun {
     }
 }
 
-/// A medium waiting to be sent, its bytes in base64 (D14).
-pub fn attached(pending: &Pending) -> wire::Attached {
-    wire::Attached {
-        number: pending.number,
-        kind: media_kind(pending.source.kind),
-        name: pending.source.name.clone(),
-        ext: pending.source.ext.clone(),
-        base64: wire::base64::encode(&pending.source.bytes),
-    }
-}
-
 /// The medium back; `None` when its base64 is not.
 pub fn attached_of(attached: wire::Attached) -> Option<Pending> {
     Some(Pending {
@@ -538,7 +527,9 @@ mod tests {
     }
 
     #[test]
-    fn a_medium_goes_as_base64_and_back() {
+    fn a_medium_comes_from_base64() {
+        // The twin of `attached` is the surface's (AGL-127, D2): its test
+        // holds that the same bytes go out as base64.
         let pending = Pending {
             number: 2,
             source: Source {
@@ -548,6 +539,21 @@ mod tests {
                 name: "said.wav".into(),
             },
         };
-        assert_eq!(attached_of(attached(&pending)), Some(pending));
+        let attached = wire::Attached {
+            number: 2,
+            kind: wire::MediaKind::Audio,
+            name: "said.wav".into(),
+            ext: "wav".into(),
+            base64: "AAEC/w==".into(),
+        };
+        assert_eq!(attached_of(attached), Some(pending));
+        let bad = wire::Attached {
+            number: 1,
+            kind: wire::MediaKind::Image,
+            name: "x.png".into(),
+            ext: "png".into(),
+            base64: "not base64!".into(),
+        };
+        assert_eq!(attached_of(bad), None);
     }
 }

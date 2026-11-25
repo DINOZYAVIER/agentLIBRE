@@ -13,12 +13,10 @@ pub(crate) use agentlibre_common::{paths, settings, tty};
 pub(crate) use agentlibre_core::{
     about,
     action,
-    attach,
     backend,
     engine,
     function,
     i18n,
-    media,
     plane,
     record,
     records,
@@ -32,7 +30,7 @@ pub(crate) use agentlibre_core::{
 // What the tests of the surfaces drive: the run's own reports, phases and
 // tools (AGL-130, D12).
 #[cfg(test)]
-pub(crate) use agentlibre_core::{agent, phase, tools};
+pub(crate) use agentlibre_core::{agent, media, phase, tools};
 pub(crate) use agentlibre_forge::{forge, memory};
 
 use std::ffi::OsString;
@@ -393,16 +391,16 @@ fn agent_session(
     let mut pending = Vec::new();
     let placeholders: Vec<String> = sources
         .into_iter()
-        .map(|source| attach::add_counted(&opened.session.media, &mut pending, source))
+        .map(|source| agentlibre_surface::attach::add_counted(&opened.session.media, &mut pending, source))
         .collect();
-    let message = attach::with_placeholders(&placeholders, &message);
+    let message = agentlibre_surface::attach::with_placeholders(&placeholders, &message);
     // The turn runs in the daemon (AGL-076, D5); what it tells is said here.
     let mut report = StderrReport::new(lang);
     let done = remote
         .ask(
             agentlibre_client::Command::Say {
                 message,
-                attached: pending.iter().map(plane::wire::attached).collect(),
+                attached: pending.iter().map(agentlibre_surface::attach::attached).collect(),
                 reasoning: args.reasoning.map(|level| level.name().to_owned()),
             },
             &mut |sent| agentlibre_client::give(sent, &mut report),

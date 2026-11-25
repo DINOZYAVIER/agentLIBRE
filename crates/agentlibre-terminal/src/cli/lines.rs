@@ -10,7 +10,7 @@ use agentlibre_client::Command;
 use agentlibre_proto::{self as proto, Done, SessionView, Text, Told, TurnEnd};
 
 use crate::Setup;
-use crate::attach;
+use agentlibre_surface::attach;
 use agentlibre_common::media::{Pending, Source};
 use crate::cli::args::{MemoryAction, look_of, memory_action};
 use crate::cli::commands;
@@ -204,7 +204,7 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         let done = ask(
             Command::Say {
                 message: text,
-                attached: attached.iter().map(crate::plane::wire::attached).collect(),
+                attached: attached.iter().map(attach::attached).collect(),
                 reasoning: reasoning.map(|level| level.name().to_owned()),
             },
             &mut session,

@@ -47,7 +47,7 @@ use crate::error::CoreError;
 use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::interrupt;
-use crate::media::{self, Clip};
+use agentlibre_surface::clipboard::{self, Clip};
 use crate::status::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
@@ -112,18 +112,8 @@ impl Control {
     /// Attaches `source` to the line being written; returns its
     /// placeholder (D21).
     fn attach(&self, source: Source) -> String {
-        let mut inner = self.lock();
-        let index = Kind::ALL.iter().position(|k| *k == source.kind).unwrap_or(0);
-        let waiting = inner
-            .pending
-            .iter()
-            .filter(|p| p.source.kind == source.kind)
-            .count() as u32;
-        let number = inner.media_counts[index] + waiting + 1;
-        let item = Pending { number, source };
-        let placeholder = item.placeholder();
-        inner.pending.push(item);
-        placeholder
+        let inner = &mut *self.lock();
+        agentlibre_surface::attach::add_counted(&inner.media_counts, &mut inner.pending, source)
     }
 
     fn set_state(&self, state: Option<String>) {
@@ -1327,7 +1317,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             term::restore();
             unsafe { libc::_exit(i32::from(interrupt::EXIT_CODE)) }
         }),
-        clipboard: Box::new(media::clipboard),
+        clipboard: Box::new(clipboard::clipboard),
         voice: voice.clone(),
         open_inspect: Box::new(open_inspect),
         open_browser: Some(Box::new(
@@ -1685,7 +1675,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 let done = ask(
                     Command::Say {
                         message,
-                        attached: pending.iter().map(crate::plane::wire::attached).collect(),
+                        attached: pending.iter().map(agentlibre_surface::attach::attached).collect(),
                         reasoning: reasoning.map(|level| level.name().to_owned()),
                     },
                     &mut |sent| {

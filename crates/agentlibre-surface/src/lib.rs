@@ -4,6 +4,8 @@
 //! attachments, the table of the slash commands, the texts of `/help` and
 //! `/status`, the fold of a session into records. It links no core.
 
+pub mod attach;
+pub mod clipboard;
 mod error;
 
 pub use error::Error;
