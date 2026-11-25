@@ -13,7 +13,7 @@ use crate::Setup;
 use agentlibre_surface::attach;
 use agentlibre_common::media::{Pending, Source};
 use agentlibre_surface::commands::{self, Memory, look_of, memory};
-use crate::cli::report::StderrReport;
+use crate::report::StderrReport;
 use crate::error::Error;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::reasoning::ReasoningLevel;
@@ -242,7 +242,7 @@ fn ended(error: agentlibre_client::Error) -> Error {
 fn of_said(done: Done) -> Result<Text, Error> {
     done.said
         .expect("a command's saying")
-        .map_err(|text| Error::Client(agentlibre_client::Error::Said { text }))
+        .map_err(|text| Error::Surface(agentlibre_surface::Error::Client(agentlibre_client::Error::Said { text })))
 }
 
 /// `path` without one pair of quotes, as a shell or a file manager gives it.
@@ -294,7 +294,7 @@ impl Record {
             record_error,
         } = said;
         if let Some(text) = record_error {
-            return Err(Error::Client(agentlibre_client::Error::Said { text }));
+            return Err(Error::Surface(agentlibre_surface::Error::Client(agentlibre_client::Error::Said { text })));
         }
         let mut answer = false;
         for told in lines {

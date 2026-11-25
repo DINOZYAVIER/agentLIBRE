@@ -2,10 +2,6 @@
 
 mod cli;
 mod error;
-mod interrupt;
-mod remote;
-mod repl;
-mod theme;
 
 // The core's modules under the names the terminal's code always used.
 pub(crate) use agentlibre_common::{paths, settings, tty};
@@ -21,32 +17,23 @@ pub(crate) use agentlibre_core::{
     weights,
     wsl,
 };
-// What the tests of the surfaces drive: the run's own reports, phases and
-// tools (AGL-130, D12).
+// The media a listed session names (AGL-014), in the session listing's tests.
 #[cfg(test)]
-pub(crate) use agentlibre_core::{agent, media, phase, tools, whisper};
+pub(crate) use agentlibre_core::media;
 pub(crate) use agentlibre_forge::{forge, memory};
 
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use cli::args::Command;
-use cli::report::StderrReport;
 use error::{CoreError, Error};
 use function::Function;
 use agentlibre_common::i18n::{Lang, m};
-use agentlibre_common::outln;
 use agentlibre_common::tr;
 use paths::Paths;
-use agentlibre_client::Remote;
-use agentlibre_proto as proto;
-use proto::{StopReason, TurnEnd};
 use session::Session;
 use settings::{function_name, ReplSettings, UserFile};
-use theme::Theme;
 
 /// The auto-init of the Run path (AGL-026, D2): the workspace the cwd
 /// resolved to is materialized when its marker is missing — the same
@@ -67,25 +54,6 @@ fn auto_init(project: &forge::Workspace, lang: Lang) -> Result<(), Error> {
 
 /// How many sessions `agl --resume` lists (AGL-058, D20).
 const SESSIONS_LISTED: usize = 20;
-
-/// Everything a session needs: its plane in the daemon (AGL-076, D5), and
-/// what the terminal draws with.
-pub struct Setup {
-    pub remote: Arc<Remote>,
-    pub opened: proto::Opened,
-    pub lang: Lang,
-    pub theme: Theme,
-    pub repl: ReplSettings,
-    pub history_file: PathBuf,
-    /// The Functions of the REPL's `/function` (AGL-036, D3) and the planes
-    /// of its `/plane` (AGL-077, D12), by the daemon (AGL-126, D2).
-    pub stores: Arc<agentlibre_surface::daemon::Stores>,
-    /// agentLIBRE's directories, for the settings of Ctrl-F (AGL-109, D6) and
-    /// the daemon's socket.
-    pub paths: Paths,
-    /// The REPL's voice, by the daemon (AGL-076, D15).
-    pub voice: Arc<dyn agentlibre_surface::dictation::Dictation>,
-}
 
 pub fn cli() -> ExitCode {
     let env = |name: &str| std::env::var_os(name);
@@ -273,157 +241,32 @@ fn run(
         return Err(CoreError::FunctionWithResume.into());
     }
     // The engine agl launched is the daemon's now, stopped when no plane
-    // uses it (AGL-076, D16).
-    let mut args = args;
-    loop {
-        match agent_session(&env, &paths, &user, &cwd, &args, *lang)? {
-            repl::End::Exit(code) => return Ok(code),
-            // `/function <name>` (AGL-036, D4): a new session with that
-            // Function, the reasoning level kept.
-            // `/plane <name>` (AGL-077, D12): a new session in that plane,
-            // the reasoning level kept.
-            repl::End::Plane { name, reasoning } => {
-                args = cli::args::Args {
-                    plane: Some(name),
-                    reasoning,
-                    yes: args.yes,
-                    ..cli::args::Args::default()
-                };
-            }
-            repl::End::Function {
-                name,
-                reasoning,
-                plane,
-            } => {
-                args = cli::args::Args {
-                    function: Some(name),
-                    plane,
-                    reasoning,
-                    yes: args.yes,
-                    ..cli::args::Args::default()
-                };
-            }
-        }
-    }
-}
-
-/// One session of the agent command: `-p`, the interactive session or the
-/// stdin session, with the Function of `args` (AGL-036, D4: the
-/// interactive session may end in a switch to another Function), its
-/// plane in the daemon (AGL-076, D5).
-fn agent_session(
-    env: &impl Fn(&str) -> Option<OsString>,
-    paths: &Paths,
-    user: &UserFile,
-    cwd: &Path,
-    args: &cli::args::Args,
-    lang: Lang,
-) -> Result<repl::End, Error> {
-    // The files of `--attach` are read before anything is started.
-    let sources = args
-        .attach
-        .iter()
-        .map(|path| agentlibre_common::media::Source::from_file(Path::new(path)))
-        .collect::<Result<Vec<_>, _>>()?;
-    let interactive = tty::is_interactive();
-    let repl_settings = ReplSettings::of(user);
-    let (remote, opened) = remote::open(
+    // uses it (AGL-076, D16); the sessions are the repl crate's (AGL-131, D4).
+    let rev = env(about::REV_VAR).and_then(|rev| rev.into_string().ok());
+    agentlibre_repl::run(agentlibre_repl::Options {
         paths,
-        remote::Opening {
-            cwd,
-            plane: args.plane.as_deref(),
-            resume: args.resume.as_deref(),
-            function: args.function.as_deref(),
+        repl: ReplSettings::of(&user),
+        colors: user.colors,
+        cwd,
+        lang: *lang,
+        version: about::version(rev.as_deref()),
+        args: agentlibre_repl::Args {
+            prompt: args.prompt.clone(),
+            resume: args.resume.clone(),
+            function: args.function.clone(),
+            plane: args.plane.clone(),
             reasoning: args.reasoning,
             yes: args.yes,
-            one_request: args.prompt.is_some(),
-            // The server comes up as the REPL starts (AGL-046).
-            start_server: args.prompt.is_none() && interactive && repl_settings.start_server,
+            attach: args.attach.clone(),
         },
-        lang,
-    )?;
-    let Some(message) = args.prompt.clone() else {
-        // No `-p`: the interactive session (D136).
-        let plane = opened.session.plane.clone();
-        let stores = Arc::new(agentlibre_surface::daemon::Stores {
-            paths: paths.clone(),
-            lang,
-            dir: opened.workspace.clone(),
-            plane: plane.clone(),
-            function: opened.function.clone(),
-        });
-        let voice = Arc::new(agentlibre_surface::dictation::RemoteVoice {
-            paths: paths.clone(),
-            dir: opened.workspace.clone(),
-            plane,
-            lang,
-        });
-        let setup = Setup {
-            remote: Arc::clone(&remote),
-            opened,
-            lang,
-            theme: Theme::new(interactive && theme::colors_enabled(env), &user.colors),
-            repl: repl_settings,
-            history_file: paths.history_file(),
-            stores,
-            paths: paths.clone(),
-            voice,
-        };
-        let end = if interactive {
-            repl::run(setup)
-        } else {
-            cli::lines::run(setup).map(repl::End::Exit)
-        };
-        remote.close();
-        return end;
-    };
-    let id = opened.session.id.clone();
-    eprintln!("{}", tr!(lang, m::SESSION, id = id));
-    interrupt::install();
-    remote::forward_stop(&remote);
-    // The attached files get their placeholders before the message and are
-    // stored with the session; an audio is transcribed there (AGL-014).
-    let mut pending = Vec::new();
-    let placeholders: Vec<String> = sources
-        .into_iter()
-        .map(|source| agentlibre_surface::attach::add_counted(&opened.session.media, &mut pending, source))
-        .collect();
-    let message = agentlibre_surface::attach::with_placeholders(&placeholders, &message);
-    // The turn runs in the daemon (AGL-076, D5); what it tells is said here.
-    let mut report = StderrReport::new(lang);
-    let done = remote
-        .ask(
-            agentlibre_client::Command::Say {
-                message,
-                attached: pending.iter().map(agentlibre_surface::attach::attached).collect(),
-                reasoning: args.reasoning.map(|level| level.name().to_owned()),
-            },
-            &mut |sent| agentlibre_client::give(sent, &mut report),
-        )
-        .map_err(Error::from)?;
-    remote.close();
-    let turn = done
-        .turn
-        .expect("a message's turn")
-        .map_err(|text| Error::Client(agentlibre_client::Error::Said { text }))?;
-    match turn {
-        TurnEnd::Answer(text) => {
-            outln!("{text}");
-            Ok(repl::End::Exit(ExitCode::SUCCESS))
-        }
-        TurnEnd::Stopped(reason) => {
-            let why = done.why.unwrap_or_default();
-            eprintln!("agl: {}", i18n::stopped_why(&why, &id, lang));
-            Ok(repl::End::Exit(ExitCode::from(match reason {
-                StopReason::Interrupted => interrupt::EXIT_CODE,
-                _ => 1,
-            })))
-        }
-    }
+    })
+    .map_err(Error::from)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use agentlibre_common::testutil::TempDir;
 

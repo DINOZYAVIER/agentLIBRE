@@ -1173,6 +1173,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         history_file,
         stores,
         paths,
+        version,
         voice: dictation,
     } = setup;
     let resumed = opened.resumed;
@@ -1351,13 +1352,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     // The splash of the REPL's start (AGL-065, D2 to D7): the art, and
     // under it, muted, the version, the tagline and the address.
     if repl.splash {
-        let rev = std::env::var(crate::about::REV_VAR).ok();
-        dock.print(&splash::lines(
-            &theme,
-            dock.columns(),
-            lang,
-            &crate::about::version(rev.as_deref()),
-        ));
+        dock.print(&splash::lines(&theme, dock.columns(), lang, &version));
     }
     presenter.show_notice(&tr!(lang, m::SESSION, id = opened.session.id), Role::Muted);
     if resumed {
@@ -1610,7 +1605,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         Some(Err(text)) => Err(text),
                         None => Ok(()),
                     },
-                    None => Err(Error::Client(agentlibre_client::Error::Gone).message(lang)),
+                    None => Err(Error::Surface(agentlibre_surface::Error::Client(agentlibre_client::Error::Gone)).message(lang)),
                 };
                 match found {
                     Ok(()) => {
@@ -1731,7 +1726,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     voice.cancel();
     dock.finish();
     if gone {
-        return Err(Error::Client(agentlibre_client::Error::Gone));
+        return Err(Error::Surface(agentlibre_surface::Error::Client(agentlibre_client::Error::Gone)));
     }
     Ok(end)
 }

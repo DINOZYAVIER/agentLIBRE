@@ -13,12 +13,10 @@ dependencies = [
  "agentlibre-daemon",
  "agentlibre-forge",
  "agentlibre-proto",
+ "agentlibre-repl",
  "agentlibre-surface",
- "libc",
- "pulldown-cmark",
  "qrcode",
  "serde_json",
- "unicode-width",
 ]
 
 [[package]]
@@ -105,6 +103,22 @@ dependencies = [
  "base64",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "agentlibre-repl"
+version = "0.1.0"
+dependencies = [
+ "agentlibre-client",
+ "agentlibre-common",
+ "agentlibre-core",
+ "agentlibre-forge",
+ "agentlibre-proto",
+ "agentlibre-surface",
+ "libc",
+ "pulldown-cmark",
+ "serde_json",
+ "unicode-width",
 ]
 
 [[package]]

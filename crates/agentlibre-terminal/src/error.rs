@@ -58,8 +58,14 @@ pub enum Error {
     CurrentDir(io::Error),
     /// `--attach` without `-p` (AGL-014, D21).
     AttachWithoutPrompt,
-    /// The terminal cannot be switched to raw mode.
-    Terminal { source: io::Error },
+    /// A session of the repl crate failed (AGL-131, D5).
+    Session(agentlibre_repl::Error),
+}
+
+impl From<agentlibre_repl::Error> for Error {
+    fn from(source: agentlibre_repl::Error) -> Error {
+        Error::Session(source)
+    }
 }
 
 impl From<agentlibre_surface::Error> for Error {
@@ -177,6 +183,7 @@ impl Error {
     pub fn exit_code(&self) -> u8 {
         match self {
             Error::Core(error) => error.exit_code(),
+            Error::Session(error) => error.exit_code(),
             _ if self.is_usage() => 2,
             _ => 1,
         }
@@ -195,6 +202,7 @@ impl Error {
     fn text(&self, lang: Lang) -> String {
         match self {
             Error::Core(error) => error.message(lang),
+            Error::Session(error) => error.message(lang),
             Error::Client(error) => agentlibre_surface::client_message(error, lang),
             Error::Daemon(error) => error.message(lang),
             Error::BridgeNotSet { path } => tr!(lang, BRIDGE_NOT_SET, path = path.display()),
@@ -223,7 +231,6 @@ impl Error {
             }
             Error::CurrentDir(source) => tr!(lang, CURRENT_DIR, source = source),
             Error::AttachWithoutPrompt => tr!(lang, ATTACH_WITHOUT_PROMPT).to_string(),
-            Error::Terminal { source } => tr!(lang, TERMINAL, source = source),
         }
     }
 }
@@ -330,12 +337,6 @@ const SEARCH_CA_NOT_SET: Msg = Msg {
 const SEARCH_LOGIN: Msg = Msg {
     en: "agl search login failed: {detail}",
     uk: "agl search login не вдався: {detail}",
-};
-
-/// `Error::Terminal`.
-const TERMINAL: Msg = Msg {
-    en: "cannot switch the terminal to raw mode: {source}",
-    uk: "не вдалося перемкнути термінал у raw-режим: {source}",
 };
 
 /// `Error::UnknownOption`.

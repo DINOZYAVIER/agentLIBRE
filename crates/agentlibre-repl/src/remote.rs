@@ -56,9 +56,9 @@ pub fn open(paths: &Paths, opening: Opening, lang: Lang) -> Result<(Arc<Remote>,
         _ => {}
     })?;
     let Reply::Opened(opened) = reply else {
-        return Err(Error::Client(agentlibre_client::Error::Daemon {
+        return Err(Error::Surface(agentlibre_surface::Error::Client(agentlibre_client::Error::Daemon {
             detail: format!("an unexpected reply: {reply:?}"),
-        }));
+        })));
     };
     let mut remote = Remote::new(client, opened.session.id.clone());
     // A question of a turn of `-p` is asked on the plain terminal, as the
