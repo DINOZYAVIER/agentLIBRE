@@ -82,6 +82,15 @@ pub struct SessionShow {
 
 pub use crate::memory::MemoryAction;
 
+/// What `/memory list` and `/memory show` look at, as the protocol says it;
+/// a removal is not a look (AGL-130, D4).
+pub fn look_of(action: MemoryAction) -> agentlibre_proto::Look {
+    match action {
+        MemoryAction::Show { name } => agentlibre_proto::Look::Show { name },
+        _ => agentlibre_proto::Look::List,
+    }
+}
+
 /// Reads the words after `memory`, of the command line and of `/memory`.
 pub fn memory_action(words: impl IntoIterator<Item = String>) -> Result<MemoryAction, Error> {
     let mut words = words.into_iter();

@@ -21,7 +21,7 @@ use agentlibre_proto::ToolCall;
 use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::records::{self, BlockKind, Record};
-use crate::session::{Event, TransitionLine};
+use agentlibre_proto::{Event, PhaseTime};
 use agentlibre_common::settings::Detail;
 use agentlibre_common::style::Role;
 use crate::theme::Theme;
@@ -67,8 +67,8 @@ pub struct Inspect {
 }
 
 impl Inspect {
-    pub fn new(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Inspect {
-        let records = super::transcript::records_of(events, transitions, lang);
+    pub fn new(events: &[Event], transitions: &[PhaseTime], lang: Lang) -> Inspect {
+        let records = records::group(events, transitions, lang);
         let selection = records.len().saturating_sub(1);
         let block = records
             .get(selection)
@@ -156,8 +156,8 @@ impl Inspect {
     /// records are built anew, and the standing focus keeps its record —
     /// the session's file only appends — while the follow goes after the
     /// new tail.
-    pub fn reload(&mut self, events: &[Event], transitions: &[TransitionLine], lang: Lang) {
-        self.records = super::transcript::records_of(events, transitions, lang);
+    pub fn reload(&mut self, events: &[Event], transitions: &[PhaseTime], lang: Lang) {
+        self.records = records::group(events, transitions, lang);
         if self.follow {
             self.go_tail();
             return;
@@ -592,11 +592,11 @@ pub fn run(
     theme: &Theme,
     lang: Lang,
     events: Vec<Event>,
-    transitions: Vec<TransitionLine>,
+    transitions: Vec<PhaseTime>,
     outputs: std::path::PathBuf,
     dock: &Dock,
     keys: &ModeKeys,
-    poll: &dyn Fn() -> Option<(Vec<Event>, Vec<TransitionLine>)>,
+    poll: &dyn Fn() -> Option<(Vec<Event>, Vec<PhaseTime>)>,
 ) -> Exit {
     let mut inspect = Inspect::new(&events, &transitions, lang);
     let mut parser = term::Parser::default();
@@ -731,8 +731,7 @@ fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::{Outcome, Value};
-    use crate::backend::ToolCall;
+    use agentlibre_proto::{Outcome, Value};
 
     fn call(id: &str, command: &str) -> ToolCall {
         ToolCall {
@@ -752,6 +751,7 @@ mod tests {
             Event::Call {
                 text: Some("I will run it.\nAnd explain why.\nAnd more.".into()),
                 call: call("c1", "ls"),
+                summary: Some("ls".into()),
             },
             Event::Result {
                 id: "c1".into(),
@@ -918,6 +918,7 @@ mod tests {
             Event::Call {
                 text: None,
                 call: call("c1", "ls"),
+                summary: Some("ls".into()),
             },
             Event::Result {
                 id: "c1".into(),
@@ -968,6 +969,7 @@ mod tests {
             Event::Call {
                 text: None,
                 call: call("c1", "ls"),
+                summary: Some("ls".into()),
             },
             Event::Result {
                 id: "c1".into(),
@@ -1012,6 +1014,7 @@ mod tests {
             Event::Call {
                 text: None,
                 call: call("c1", "ls"),
+                summary: Some("ls".into()),
             },
         ];
         let mut inspect = Inspect::new(&events, &[], Lang::En);
@@ -1039,6 +1042,7 @@ mod tests {
                         .into(),
                 ),
                 call: call("c1", "ls"),
+                summary: Some("ls".into()),
             },
             Event::Result {
                 id: "c1".into(),
@@ -1071,6 +1075,7 @@ mod tests {
             Event::Call {
                 text: None,
                 call: call("c1", "ls"),
+                summary: Some("ls".into()),
             },
             Event::Result {
                 id: "c1".into(),
@@ -1104,6 +1109,7 @@ mod tests {
             Event::Call {
                 text: None,
                 call: call("c1", "ls"),
+                summary: Some("ls".into()),
             },
             Event::Result {
                 id: "c1".into(),
@@ -1148,6 +1154,7 @@ mod tests {
                         ("text".into(), Value::Text("the bullet".into())),
                     ],
                 },
+                summary: None,
             },
             Event::Result {
                 id: "c1".into(),

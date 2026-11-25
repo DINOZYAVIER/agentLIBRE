@@ -181,7 +181,7 @@ pub fn media_line(medium: &Media, lang: Lang) -> String {
 
 /// A Function's source in the language (AGL-130, D10): the word `Source::label`
 /// of the core says for it.
-fn source_label(source: FunctionSource, lang: Lang) -> &'static str {
+pub fn source_label(source: FunctionSource, lang: Lang) -> &'static str {
     match source {
         FunctionSource::Plane => tr!(lang, m::FUNCTION_SOURCE_PLANE),
         FunctionSource::Workspace => tr!(lang, m::FUNCTION_SOURCE_WORKSPACE),

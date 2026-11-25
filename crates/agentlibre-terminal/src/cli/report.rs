@@ -2,13 +2,12 @@
 
 use std::io::{self, Write};
 
-use crate::action::Outcome;
-use crate::agent::{Report, Sink};
-use crate::backend::ToolCall;
+use agentlibre_client::Surface;
 use agentlibre_common::i18n::{Lang, m};
-use crate::session::{CutOff, Event, ForgeKind};
-use crate::tools::{spec::call_summary, ToolResult};
 use agentlibre_common::tr;
+use agentlibre_proto::{CutOff, Event, ForgeKind, MemoryKind, Outcome, Report, ToolCall};
+
+use crate::records::ToolResult;
 
 /// How much of a command the progress line shows.
 const COMMAND_WIDTH: usize = 200;
@@ -16,20 +15,18 @@ const COMMAND_WIDTH: usize = 200;
 pub struct StderrReport {
     pub lang: Lang,
     thinking: bool,
-    /// The call whose result is next.
-    call: Option<ToolCall>,
+    /// The call whose result is next, and its one line.
+    call: Option<(ToolCall, String)>,
 }
 
-impl crate::plane::Turn for StderrReport {
+impl Surface for StderrReport {
+    /// Takes what the turn tells (AGL-067, D3).
+    fn report(&mut self, report: Report) {
+        self.take(report);
+    }
+
     fn line(&mut self, line: &str) {
         eprintln!("{line}");
-    }
-}
-
-impl Sink for StderrReport {
-    /// Takes what the turn tells (AGL-067, D3).
-    fn send(&mut self, report: Report) {
-        self.take(report);
     }
 }
 
@@ -47,17 +44,19 @@ impl StderrReport {
             Report::Event(Event::State(state)) => self.state(&state),
             Report::Thinking(piece) => self.thinking(&piece),
             Report::ThinkingDone => self.thinking_done(),
-            Report::Event(Event::Call { text, call }) => {
+            Report::Event(Event::Call { text, call, summary }) => {
                 if let Some(text) = text {
                     self.text(&text);
                 }
-                self.call(&call);
-                self.call = Some(call);
+                // The daemon's summary of the call (AGL-130, D9).
+                let summary = summary.unwrap_or_default();
+                self.call(&call, &summary);
+                self.call = Some((call, summary));
             }
             Report::Event(Event::Result {
                 outcome, content, ..
             }) => {
-                if let Some(call) = self.call.take() {
+                if let Some((call, _)) = self.call.take() {
                     self.result(&call, &ToolResult { outcome, content });
                 }
             }
@@ -104,23 +103,23 @@ impl StderrReport {
         eprintln!("{text}");
     }
 
-    fn call(&mut self, call: &ToolCall) {
-        eprintln!("> {}: {}", call.name, cut(&call_summary(call), COMMAND_WIDTH));
+    fn call(&mut self, call: &ToolCall, summary: &str) {
+        eprintln!("> {}: {}", call.name, cut(summary, COMMAND_WIDTH));
     }
 
     fn result(&mut self, call: &ToolCall, result: &ToolResult) {
         eprintln!("  {}", result_summary(call, result, self.lang));
     }
 
-    pub fn memory(&mut self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
-        eprintln!("{}", crate::records::memory_line(name, crate::plane::wire::memory_kind(kind), self.lang));
+    pub fn memory(&mut self, name: &str, kind: MemoryKind, text: Option<&str>) {
+        eprintln!("{}", crate::records::memory_line(name, kind, self.lang));
         if let Some(text) = text {
             eprintln!("{text}");
         }
     }
 
     fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
-        eprintln!("{}", crate::records::forge_line(name, crate::plane::wire::forge_kind(kind), section, self.lang));
+        eprintln!("{}", crate::records::forge_line(name, kind, section, self.lang));
     }
 
     fn compacted(&mut self) {
@@ -128,7 +127,7 @@ impl StderrReport {
     }
 
     fn cut_off(&mut self, cut: &CutOff) {
-        eprintln!("{}", crate::status::cut_off_line(&crate::plane::wire::cut_off(cut), self.lang));
+        eprintln!("{}", crate::status::cut_off_line(cut, self.lang));
     }
 
     fn stirred(&mut self, attempt: u32, _max: u32, error: &str) {
@@ -184,14 +183,21 @@ pub fn result_summary(call: &ToolCall, result: &ToolResult, lang: Lang) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::{Outcome, Value};
+    use crate::action::Value;
+    use crate::backend::ToolCall as CoreCall;
+    use crate::tools::spec::call_summary;
 
-    fn bash(command: &str) -> ToolCall {
-        ToolCall {
+    fn bash(command: &str) -> CoreCall {
+        CoreCall {
             id: "c1".into(),
             name: "bash".into(),
             args: vec![("command".into(), Value::Text(command.into()))],
         }
+    }
+
+    /// The call as the surface holds it.
+    fn wire(call: &CoreCall) -> ToolCall {
+        crate::plane::wire::tool_call(call.clone())
     }
 
     #[test]
@@ -203,15 +209,15 @@ mod tests {
             content: "a\nb\nexit code: 101".into(),
         };
         assert_eq!(
-            result_summary(&bash("x"), &failed, Lang::En),
+            result_summary(&wire(&bash("x")), &failed, Lang::En),
             "fail (exit code: 101), 3 lines"
         );
         let empty = ToolResult {
             outcome: Outcome::Ok,
             content: "(no output)".into(),
         };
-        assert_eq!(result_summary(&bash("x"), &empty, Lang::Uk), "ok, 0 рядків");
-        let edit = ToolCall {
+        assert_eq!(result_summary(&wire(&bash("x")), &empty, Lang::Uk), "ok, 0 рядків");
+        let edit = CoreCall {
             id: "c2".into(),
             name: "edit".into(),
             args: vec![("path".into(), Value::Text("src/lib.rs".into()))],
@@ -222,7 +228,7 @@ mod tests {
             content: "Replaced 1 occurrence in src/lib.rs.".into(),
         };
         assert_eq!(
-            result_summary(&edit, &edited, Lang::En),
+            result_summary(&wire(&edit), &edited, Lang::En),
             "ok: Replaced 1 occurrence in src/lib.rs."
         );
     }
@@ -232,9 +238,11 @@ mod tests {
 mod search_tests {
     use super::*;
     use crate::action::Value;
+    use crate::backend::ToolCall as CoreCall;
+    use crate::tools::spec::call_summary;
 
-    fn call(args: &[(&str, &str)]) -> ToolCall {
-        ToolCall {
+    fn call(args: &[(&str, &str)]) -> CoreCall {
+        CoreCall {
             id: "c".into(),
             name: "search".into(),
             args: args
@@ -242,6 +250,10 @@ mod search_tests {
                 .map(|(n, v)| (n.to_string(), Value::Text(v.to_string())))
                 .collect(),
         }
+    }
+
+    fn wire(call: &CoreCall) -> ToolCall {
+        crate::plane::wire::tool_call(call.clone())
     }
 
     #[test]
@@ -253,19 +265,20 @@ mod search_tests {
     fn a_search_result_shows_how_many_results() {
         let list = "1. A\n   https://a.example/\n   one. two. 3. not a result\n2. B\n   https://b.example/\nSuggestions: x";
         let ok = ToolResult { outcome: Outcome::Ok, content: list.into() };
-        assert_eq!(result_summary(&call(&[]), &ok, Lang::En), "ok: 2 results");
+        assert_eq!(result_summary(&wire(&call(&[])), &ok, Lang::En), "ok: 2 results");
         let none = ToolResult { outcome: Outcome::Ok, content: "No results.".into() };
-        assert_eq!(result_summary(&call(&[]), &none, Lang::En), "ok: 0 results");
+        assert_eq!(result_summary(&wire(&call(&[])), &none, Lang::En), "ok: 0 results");
         // A failure says why.
         let fail = ToolResult { outcome: Outcome::Fail, content: "The search timed out.".into() };
-        assert_eq!(result_summary(&call(&[]), &fail, Lang::En), "fail: The search timed out.");
+        assert_eq!(result_summary(&wire(&call(&[])), &fail, Lang::En), "fail: The search timed out.");
     }
 }
 
 #[cfg(test)]
 mod memory_tests {
-    use super::*;
     use crate::action::Value;
+    use crate::backend::ToolCall;
+    use crate::tools::spec::call_summary;
 
     #[test]
     fn a_memory_call_shows_the_action_and_what_it_is_about() {
@@ -282,8 +295,9 @@ mod memory_tests {
 
 #[cfg(test)]
 mod forge_tests {
-    use super::*;
     use crate::action::Value;
+    use crate::backend::ToolCall;
+    use crate::tools::spec::call_summary;
 
     fn call(args: &[(&str, &str)]) -> ToolCall {
         ToolCall {

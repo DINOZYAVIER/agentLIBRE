@@ -21,6 +21,7 @@ path = "src/bin/agentLIBRE.rs"
 
 [dependencies]
 agentlibre-bridge = { path = "../agentlibre-bridge" }
+agentlibre-client = { path = "../agentlibre-client" }
 agentlibre-common = { path = "../agentlibre-common" }
 agentlibre-core = { path = "../agentlibre-core" }
 agentlibre-forge = { path = "../agentlibre-forge" }

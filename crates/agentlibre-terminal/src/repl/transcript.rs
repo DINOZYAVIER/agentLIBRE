@@ -9,33 +9,18 @@ use std::time::{Duration, Instant};
 use super::card::{self, Fold, Render, block_lines, notice_block_lines, summary, user_lines};
 use super::dock::grouped;
 use super::reading::{MIN_TOKENS_OF_A_SPEED, Reading};
-use crate::records::{self, Record};
+use crate::records::{self, Record, ToolResult};
 use super::text::StreamWrap;
-use crate::agent::{Report, Sink};
-use crate::backend::{Prefill, PromptProgress, ToolCall};
+use agentlibre_client::Surface;
 use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
-use crate::phase::{Phase, Transition};
-use crate::session::{CutOff, Event, TransitionLine};
 use agentlibre_common::settings::{Detail, ReplSettings};
 use agentlibre_common::style::Role;
 use crate::theme::Theme;
-use crate::tools::ToolResult;
 use agentlibre_common::tr;
-use agentlibre_proto as proto;
-
-/// The records of a session's events (AGL-066). The events are the core's
-/// until the surfaces hold the wire's types (AGL-130, step 6): they cross
-/// to the wire's here, where `records::group` takes them.
-pub(super) fn records_of(events: &[Event], transitions: &[TransitionLine], lang: Lang) -> Vec<Record> {
-    let events: Vec<proto::Event> = events.iter().cloned().map(crate::plane::wire::event).collect();
-    let transitions: Vec<proto::PhaseTime> = transitions
-        .iter()
-        .cloned()
-        .map(crate::plane::wire::phase_time)
-        .collect();
-    records::group(&events, &transitions, lang)
-}
+use agentlibre_proto::{
+    CutOff, Event, MemoryKind, Phase, PhaseTime, Prefill, PromptProgress, Report, ToolCall, Transition,
+};
 
 /// A phase's name, in the dock and on the rule of a step (D135; AGL-045).
 pub fn label(phase: &Phase, lang: Lang) -> String {
@@ -120,8 +105,9 @@ pub struct Presenter {
     /// Whether the turn has entered its first state: only a change of state
     /// is shown (AGL-046, D13).
     state_entered: bool,
-    /// The call whose result is next.
-    pending_call: Option<ToolCall>,
+    /// The call whose result is next, and its one line (the daemon's summary,
+    /// AGL-130, D9).
+    pending_call: Option<(ToolCall, String)>,
     /// The thinking being decoded, as its pieces arrive (D3, D19): the
     /// transcript shows its line with the record of its step.
     thinking: Option<String>,
@@ -233,7 +219,7 @@ impl Presenter {
 
     /// `[cut off]` where an action hit its token limit (D154).
     pub fn show_cut_off(&self, cut: &CutOff) {
-        let line = crate::status::cut_off_line(&crate::plane::wire::cut_off(cut), self.lang);
+        let line = crate::status::cut_off_line(cut, self.lang);
         self.screen.print(&notice_block_lines(
             &self.theme,
             self.lang,
@@ -257,12 +243,12 @@ impl Presenter {
 
     /// `[memory: +name]` where the memory was written, then the text that
     /// was written, muted (AGL-006, M28).
-    pub fn show_memory(&self, name: &str, kind: crate::memory::Kind, text: Option<&str>) {
+    pub fn show_memory(&self, name: &str, kind: MemoryKind, text: Option<&str>) {
         let mut lines = notice_block_lines(
             &self.theme,
             self.lang,
             self.screen.columns(),
-            &records::memory_line(name, crate::plane::wire::memory_kind(kind), self.lang),
+            &records::memory_line(name, kind, self.lang),
             Role::Muted,
         );
         if let Some(text) = text {
@@ -331,8 +317,8 @@ impl Presenter {
     /// Shows what a session already holds (D126), through its records
     /// (AGL-066): compact by default, in full in the inspect mode.
     /// `transitions` carry the phases' times of the steps.
-    pub fn replay(&self, events: &[Event], transitions: &[TransitionLine]) {
-        for record in records_of(events, transitions, self.lang) {
+    pub fn replay(&self, events: &[Event], transitions: &[PhaseTime]) {
+        for record in records::group(events, transitions, self.lang) {
             match &record {
                 Record::User(message) => self.show_user(message),
                 Record::Wake { flow, text } => self.show_user(&format!("[{flow}] {text}")),
@@ -449,8 +435,8 @@ impl Presenter {
     /// blank that ends the block.
     fn card(
         &self,
-        call: &proto::ToolCall,
-        result: Option<&records::ToolResult>,
+        call: &ToolCall,
+        result: Option<&ToolResult>,
         hint: &str,
         items: &[String],
     ) -> Vec<String> {
@@ -535,9 +521,9 @@ impl Presenter {
     }
 }
 
-impl Sink for Presenter {
+impl Surface for Presenter {
     /// Takes what the turn tells (AGL-067, D3).
-    fn send(&mut self, report: Report) {
+    fn report(&mut self, report: Report) {
         self.take(report);
     }
 }
@@ -554,18 +540,18 @@ impl Presenter {
             Report::Thinking(piece) => self.thinking(&piece),
             Report::ThinkingDone => self.thinking_done(),
             Report::ActionText(piece) => self.action_text(&piece),
-            Report::Event(Event::Call { text, call }) => {
+            Report::Event(Event::Call { text, call, summary }) => {
                 if let Some(text) = text {
                     self.text(&text);
                 }
                 self.call();
-                self.pending_call = Some(call);
+                self.pending_call = Some((call, summary.unwrap_or_default()));
             }
             Report::Event(Event::Result {
                 outcome, content, ..
             }) => {
-                if let Some(call) = self.pending_call.take() {
-                    self.result(&call, &ToolResult { outcome, content });
+                if let Some((call, hint)) = self.pending_call.take() {
+                    self.result(&call, &hint, &ToolResult { outcome, content });
                 }
             }
             Report::Event(Event::Answer(text)) => self.answer(&text),
@@ -687,7 +673,7 @@ impl Presenter {
         self.close();
     }
 
-    fn result(&mut self, call: &ToolCall, result: &ToolResult) {
+    fn result(&mut self, call: &ToolCall, hint: &str, result: &ToolResult) {
         let phases = std::mem::take(&mut self.phases);
         let mut items = self.phase_items(&phases);
         items.push(format!(
@@ -695,14 +681,8 @@ impl Presenter {
             call.name,
             texts::duration(self.tool_time.as_secs())
         ));
-        let hint = crate::tools::spec::call_summary(call);
-        let call = crate::plane::wire::tool_call(call.clone());
-        let result = records::ToolResult {
-            outcome: crate::plane::wire::outcome(result.outcome),
-            content: result.content.clone(),
-        };
         self.screen
-            .print(&self.card(&call, Some(&result), &hint, &items));
+            .print(&self.card(call, Some(result), hint, &items));
         self.prefill = None;
     }
 
@@ -779,11 +759,11 @@ impl Presenter {
     fn transition(&mut self, transition: &Transition) {
         match transition.from {
             Phase::Ready => {}
-            Phase::Running(_) => self.tool_time = transition.time,
-            Phase::Compacting => self.compact_time = Some(transition.time),
+            Phase::Running(_) => self.tool_time = transition.time(),
+            Phase::Compacting => self.compact_time = Some(transition.time()),
             _ => self
                 .phases
-                .push((self.activity.clone(), transition.time)),
+                .push((self.activity.clone(), transition.time())),
         }
         self.activity = transition.to.clone();
         self.reading = (transition.to == Phase::Prefill)
@@ -856,9 +836,47 @@ mod tests {
 
     use super::*;
     use crate::action::{Outcome, Value};
-    use crate::repl::text::width;
+    use crate::agent::{Report, Sink};
+    use crate::backend::{Prefill, PromptProgress, ToolCall};
     use crate::phase::{Observer, PhaseEvent, Reports};
-    use crate::session::ForgeKind;
+    use crate::repl::text::width;
+    use crate::session::{Event, ForgeKind};
+    use crate::tools::ToolResult;
+    use agentlibre_proto as proto;
+
+    /// `replay` of the core's events and phase lines, which cross the mapping
+    /// to the wire's (AGL-130, D12).
+    fn replay(presenter: &Presenter, events: &[Event], transitions: &[crate::session::TransitionLine]) {
+        let events: Vec<_> = events.iter().cloned().map(crate::plane::wire::event).collect();
+        let transitions: Vec<_> = transitions
+            .iter()
+            .cloned()
+            .map(crate::plane::wire::phase_time)
+            .collect();
+        presenter.replay(&events, &transitions);
+    }
+
+    /// `result` of a core call and result, as the live path gives them.
+    fn result(presenter: &mut Presenter, call: &ToolCall, result: &ToolResult) {
+        let hint = crate::tools::spec::call_summary(call);
+        let call = crate::plane::wire::tool_call(call.clone());
+        let result = records::ToolResult {
+            outcome: crate::plane::wire::outcome(result.outcome),
+            content: result.content.clone(),
+        };
+        presenter.result(&call, &hint, &result);
+    }
+
+    /// The presenter as the run's sink (AGL-130, D12): the core's reports
+    /// cross the mapping of `plane::wire` to the wire's, so that these tests
+    /// check the mapping too.
+    struct Wired<'a>(&'a mut Presenter);
+
+    impl Sink for Wired<'_> {
+        fn send(&mut self, report: Report) {
+            self.0.report(crate::plane::wire::report(report));
+        }
+    }
 
     /// What a test tells the presenter, in a word each: the reports of a
     /// turn as the agent sends them (AGL-067).
@@ -1433,10 +1451,10 @@ mod tests {
         let (mut presenter, mock) = presenter();
         presenter.begin_turn();
         let mut observer = Observer::new();
-        observer.enter(PhaseEvent::ServerStart, &mut presenter);
+        observer.enter(PhaseEvent::ServerStart, &mut Wired(&mut presenter));
         let mut report = Reports {
             observer: &mut observer,
-            sink: &mut presenter,
+            sink: &mut Wired(&mut presenter),
         };
         report.prefill();
         report.prefill();
@@ -1476,7 +1494,7 @@ mod tests {
         let mut first = Observer::new();
         let mut report = Reports {
             observer: &mut first,
-            sink: &mut presenter,
+            sink: &mut Wired(&mut presenter),
         };
         report.prefill();
         report.thinking("hmm");
@@ -1486,7 +1504,7 @@ mod tests {
         let mut second = Observer::new();
         let mut report = Reports {
             observer: &mut second,
-            sink: &mut presenter,
+            sink: &mut Wired(&mut presenter),
         };
         report.prefill();
         report.answer("Done");
@@ -1505,7 +1523,7 @@ mod tests {
         let mut observer = Observer::new();
         let mut report = Reports {
             observer: &mut observer,
-            sink: &mut presenter,
+            sink: &mut Wired(&mut presenter),
         };
         report.prefill();
         report.context_used(52_400);
@@ -1533,7 +1551,7 @@ mod tests {
             assert_eq!(row(&printed, "OK"), "OK · Compacting <1s");
         }
         mock.printed.lock().unwrap().clear();
-        presenter.replay(
+        replay(&presenter, 
             &[Event::Compact {
                 summary: "the summary".into(),
                 question: None,
@@ -1552,7 +1570,7 @@ mod tests {
         let mut observer = Observer::new();
         let mut report = Reports {
             observer: &mut observer,
-            sink: &mut presenter,
+            sink: &mut Wired(&mut presenter),
         };
         report.prefill();
         report.prompt_read(Prefill {
@@ -1594,7 +1612,7 @@ mod tests {
         let mut observer = Observer::new();
         let mut report = Reports {
             observer: &mut observer,
-            sink: &mut presenter,
+            sink: &mut Wired(&mut presenter),
         };
         report.prefill();
         report.prompt_progress(PromptProgress {
@@ -1641,8 +1659,8 @@ mod tests {
         presenter.transition(&Transition {
             from: Phase::Writing,
             to: Phase::Thinking,
-            event: PhaseEvent::FirstThinking,
-            time: Duration::ZERO,
+            event: proto::PhaseEvent::FirstThinking,
+            micros: 0,
             violation: true,
         });
         // AGL-104, D1: the body hangs under the elbow, and the rows that
@@ -1751,11 +1769,11 @@ mod tests {
         let (mut presenter, mock) = presenter();
         presenter.begin_turn();
         let mut observer = Observer::new();
-        observer.enter(PhaseEvent::ServerStart, &mut presenter);
-        observer.enter(PhaseEvent::Transcribe, &mut presenter);
+        observer.enter(PhaseEvent::ServerStart, &mut Wired(&mut presenter));
+        observer.enter(PhaseEvent::Transcribe, &mut Wired(&mut presenter));
         let mut report = Reports {
             observer: &mut observer,
-            sink: &mut presenter,
+            sink: &mut Wired(&mut presenter),
         };
         report.prefill();
         report.thinking("hmm ");
@@ -1808,7 +1826,8 @@ mod tests {
         presenter.action_text("Looking at it.\n");
         presenter.text("Looking at it.");
         presenter.call();
-        presenter.result(
+        result(
+            &mut presenter,
             &bash("ls"),
             &ToolResult {
                 outcome: Outcome::Ok,
@@ -1997,7 +2016,7 @@ mod tests {
                 attempt: 1,
                 error: "`nope` is not a tool of this state".into(),
             },
-            Event::CutOff(CutOff {
+            Event::CutOff(crate::session::CutOff {
                 limit: 12288,
                 thinking: Some(4000),
                 discarded: 8288,
@@ -2005,7 +2024,7 @@ mod tests {
             }),
             Event::Answer("Done".into()),
         ];
-        presenter.replay(&events, &[]);
+        replay(&presenter, &events, &[]);
         let printed = mock.printed.lock().unwrap().clone();
         // The state a turn starts in is not shown (AGL-046, D13).
         assert!(!printed.contains(&"[work]".to_owned()));

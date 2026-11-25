@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use super::dock::grouped;
-use crate::backend::PromptProgress;
+use agentlibre_proto::PromptProgress;
 use crate::i18n::repl as texts;
 use agentlibre_common::i18n::Lang;
 

@@ -6,13 +6,13 @@ use std::path::PathBuf;
 use agentlibre_proto::FunctionLoad;
 
 use crate::error::CoreError as Error;
-use crate::function::catalog::Entry;
+use agentlibre_proto::FunctionEntry;
 
 pub trait Functions: Send + Sync {
     /// The Function the session runs.
     fn current(&self) -> &str;
     /// Every Function by name, the session's marked.
-    fn entries(&self) -> Result<Vec<Entry>, Error>;
+    fn entries(&self) -> Result<Vec<FunctionEntry>, Error>;
     /// The source of `name` and the file a run loads it from.
     fn show(&self, name: &str) -> Result<(String, PathBuf), Error>;
     /// What `name` runs, when it loads and its model fits the settings.
@@ -36,8 +36,11 @@ mod tests {
             &self.current
         }
 
-        fn entries(&self) -> Result<Vec<Entry>, Error> {
-            Ok(Catalog::entries(self, Lang::En))
+        fn entries(&self) -> Result<Vec<FunctionEntry>, Error> {
+            Ok(Catalog::entries(self, Lang::En)
+                .into_iter()
+                .map(crate::plane::wire::function_entry)
+                .collect())
         }
 
         fn show(&self, name: &str) -> Result<(String, PathBuf), Error> {

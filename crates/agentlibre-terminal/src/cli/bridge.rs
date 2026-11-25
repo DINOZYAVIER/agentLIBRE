@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use agentlibre_bridge::{Store, StoreError, pairing_json};
-use agentlibre_core::client;
+use crate::remote;
 use qrcode::{Color, EcLevel, QrCode};
 
 use crate::engine::{port_open, unit_active};
@@ -68,7 +68,7 @@ pub fn run(action: BridgeAction, user: &UserFile, paths: &Paths, lang: Lang) -> 
             store.certificate().map_err(store_error)?;
             let runtime = paths.runtime.as_deref().ok_or(Error::from(CoreError::DaemonNoRuntime))?;
             // The daemon first: the bridge never starts one (D18).
-            drop(client::connect(paths, false, lang, true)?);
+            drop(remote::connect(paths, false, lang, true)?);
             let program = program()?;
             let socket = agentlibre_core::daemon::socket_path(runtime);
             start(&program, &listen, store.dir(), &socket)?;

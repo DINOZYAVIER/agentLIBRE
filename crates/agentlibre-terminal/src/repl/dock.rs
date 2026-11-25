@@ -16,7 +16,7 @@ use super::reading::Reading;
 use super::text::{hard_wrap, truncate, truncate_start, width};
 use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
-use crate::phase::Phase;
+use agentlibre_proto::Phase;
 use agentlibre_common::style::Role;
 use crate::theme::Theme;
 use agentlibre_common::tr;

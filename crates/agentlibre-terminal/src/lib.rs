@@ -13,25 +13,26 @@ pub(crate) use agentlibre_common::{paths, settings, tty};
 pub(crate) use agentlibre_core::{
     about,
     action,
-    agent,
     attach,
     backend,
     engine,
     function,
     i18n,
     media,
-    phase,
     plane,
     record,
     records,
     session,
     status,
     stop,
-    tools,
     weights,
     whisper,
     wsl,
 };
+// What the tests of the surfaces drive: the run's own reports, phases and
+// tools (AGL-130, D12).
+#[cfg(test)]
+pub(crate) use agentlibre_core::{agent, phase, tools};
 pub(crate) use agentlibre_forge::{forge, memory};
 
 use std::ffi::OsString;
@@ -40,7 +41,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use agent::TurnEnd;
 use cli::args::Command;
 use cli::report::StderrReport;
 use error::{CoreError, Error};
@@ -48,9 +48,10 @@ use function::Function;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::tr;
 use paths::Paths;
-use agentlibre_core::client::Remote;
+use agentlibre_client::Remote;
 use agentlibre_proto as proto;
-use session::{Session, StopReason};
+use proto::{StopReason, TurnEnd};
+use session::Session;
 use settings::{function_name, ReplSettings, UserFile};
 use theme::Theme;
 
@@ -399,17 +400,20 @@ fn agent_session(
     let mut report = StderrReport::new(lang);
     let done = remote
         .ask(
-            plane::Command::Say {
+            agentlibre_client::Command::Say {
                 message,
-                attached: pending,
-                reasoning: args.reasoning,
-                observer: None,
+                attached: pending.iter().map(plane::wire::attached).collect(),
+                reasoning: args.reasoning.map(|level| level.name().to_owned()),
             },
-            &mut |sent| sent.give(&mut report),
+            &mut |sent| agentlibre_client::give(sent, &mut report),
         )
-        .ok_or(Error::from(CoreError::PlaneGone))?;
+        .map_err(|error| Error::from(CoreError::from(error)))?;
     remote.close();
-    match done.turn.expect("a message's turn")? {
+    let turn = done
+        .turn
+        .expect("a message's turn")
+        .map_err(|text| Error::from(CoreError::Said { text }))?;
+    match turn {
         TurnEnd::Answer(text) => {
             outln!("{text}");
             Ok(repl::End::Exit(ExitCode::SUCCESS))

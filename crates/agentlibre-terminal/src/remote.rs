@@ -7,19 +7,32 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use agentlibre_core::client::{self, Remote};
-use agentlibre_core::plane::wire;
+use agentlibre_client::{Client, Remote, Start};
 use agentlibre_proto::{self as proto, Ask, Reply, Request};
 
 use agentlibre_common::reasoning::ReasoningLevel;
+use agentlibre_common::settings::ServerKind;
 use crate::error::CoreError as Error;
-use crate::function::catalog::Entry;
 use crate::repl::Functions;
-use crate::session::{Event, TransitionLine};
 use agentlibre_common::i18n::Lang;
 use crate::interrupt;
 use agentlibre_common::paths::Paths;
 use crate::whisper::Dictation;
+
+/// Connects to the daemon of `paths`, which is started when none answers
+/// and `start` says so (AGL-076, D6); `human` says whether a human answers
+/// the planes' questions (D11). The clients' crate knows no `Paths`
+/// (AGL-121, D29; AGL-130, D6).
+pub fn connect(paths: &Paths, human: bool, lang: Lang, start: bool) -> Result<Client, Error> {
+    let runtime = paths.runtime.as_deref().ok_or(Error::DaemonNoRuntime)?;
+    let start = if start { Start::ThisExe } else { Start::No };
+    Ok(Client::connect(
+        &agentlibre_client::socket_path(runtime),
+        human,
+        lang.code(),
+        start,
+    )?)
+}
 
 /// What the terminal opens.
 pub struct Opening<'a> {
@@ -38,7 +51,7 @@ pub struct Opening<'a> {
 /// plain terminal when there is one (D11).
 pub fn open(paths: &Paths, opening: Opening, lang: Lang) -> Result<(Arc<Remote>, proto::Opened), Error> {
     let human = agentlibre_common::tty::is_interactive();
-    let client = client::connect(paths, human, lang, true)?;
+    let client = connect(paths, human, lang, true)?;
     let request = Request::Open(proto::Open {
         dir: opening.cwd.to_string_lossy().into_owned(),
         plane: opening.plane.map(str::to_owned),
@@ -114,7 +127,7 @@ pub struct Stores {
 
 impl Stores {
     fn ask(&self, request: &Request) -> Result<Reply, Error> {
-        let client = client::connect(&self.paths, false, self.lang, true)?;
+        let client = connect(&self.paths, false, self.lang, true)?;
         Ok(client.ask(request, &mut |_| {})?)
     }
 
@@ -153,15 +166,17 @@ impl Functions for Stores {
         &self.function
     }
 
-    fn entries(&self) -> Result<Vec<Entry>, Error> {
+    fn entries(&self) -> Result<Vec<proto::FunctionEntry>, Error> {
         match self.ask(&Request::Functions {
             dir: self.dir.clone(),
             plane: self.plane.clone(),
         })? {
+            // The current one is the session's Function, not the entry's own
+            // mark; a kind this agl does not know is not listed.
             Reply::Functions { functions } => Ok(functions
                 .into_iter()
-                .filter_map(wire::function_entry_of)
-                .map(|entry| Entry {
+                .filter(|entry| ServerKind::parse(&entry.kind).is_some())
+                .map(|entry| proto::FunctionEntry {
                     current: entry.name == self.function,
                     ..entry
                 })
@@ -196,16 +211,16 @@ impl Functions for Stores {
 /// A session read while its turn runs (AGL-126, D2): what the inspect mode
 /// shows, and whether it grew, on a connection of its own.
 pub struct Follower {
-    client: client::Client,
+    client: Client,
     session: String,
 }
 
 /// A session's events and its phases' times.
-pub type Past = (Vec<Event>, Vec<TransitionLine>);
+pub type Past = (Vec<proto::Event>, Vec<proto::PhaseTime>);
 
 impl Follower {
     pub fn of(paths: &Paths, lang: Lang, session: &str) -> Result<Follower, Error> {
-        let client = client::connect(paths, false, lang, false)?;
+        let client = connect(paths, false, lang, false)?;
         let subscribe = Request::Subscribe {
             session: Some(session.to_owned()),
         };
@@ -221,10 +236,7 @@ impl Follower {
             session: self.session.clone(),
         };
         match self.client.ask(&request, &mut |_| {})? {
-            Reply::History { events, transitions, .. } => Ok((
-                events.into_iter().map(wire::event_of).collect(),
-                transitions.into_iter().map(wire::phase_time_of).collect(),
-            )),
+            Reply::History { events, transitions, .. } => Ok((events, transitions)),
             reply => Err(unexpected(&reply)),
         }
     }
@@ -270,7 +282,7 @@ impl Dictation for RemoteVoice {
         _prompt: Option<&str>,
         _say: &mut dyn FnMut(&str),
     ) -> Result<String, Error> {
-        let client = client::connect(&self.paths, false, self.lang, true)?;
+        let client = connect(&self.paths, false, self.lang, true)?;
         let request = Request::Transcribe {
             dir: self.dir.clone(),
             plane: self.plane.clone(),

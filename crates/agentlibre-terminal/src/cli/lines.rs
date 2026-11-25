@@ -6,10 +6,12 @@ use std::cell::Cell;
 use std::io::{self, BufRead};
 use std::process::ExitCode;
 
+use agentlibre_client::Command;
+use agentlibre_proto::{self as proto, Done, SessionView, Text, Told, TurnEnd};
+
 use crate::Setup;
-use crate::agent::TurnEnd;
 use crate::attach::{self, Pending};
-use crate::cli::args::{MemoryAction, memory_action};
+use crate::cli::args::{MemoryAction, look_of, memory_action};
 use crate::cli::commands;
 use crate::cli::report::StderrReport;
 use crate::error::Error;
@@ -19,8 +21,6 @@ use agentlibre_common::reasoning::ReasoningLevel;
 use crate::interrupt;
 use crate::remote;
 use crate::media::Source;
-use crate::plane::{Command, Done, Text, Sent, SessionView, Told};
-use crate::session::{CommandRun, Event, StopReason};
 use crate::status::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
@@ -43,21 +43,19 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     let reasoning = opened.reasoning.as_deref().and_then(ReasoningLevel::parse);
     let context = Cell::new(opened.context);
     // What this session holds of its session, after each command.
-    let mut session = agentlibre_core::plane::wire::view_of(opened.session.clone());
+    let mut session = opened.session.clone();
     interrupt::install();
     remote::forward_stop(&remote);
     eprintln!("{}", tr!(lang, m::SESSION, id = session.id));
     // The plane takes the commands in the daemon (AGL-076, D5).
-    let mut ask = |command: Command, session: &mut SessionView| -> Result<Done, Error> {
+    let mut ask = |command: Command, session: &mut SessionView| -> Result<Done, agentlibre_client::Error> {
         let mut report = StderrReport::new(lang);
-        let done = remote
-            .ask(command, &mut |sent| {
-                if let Sent::Context(size) = sent {
-                    context.set(Some(size));
-                }
-                sent.give(&mut report);
-            })
-            .ok_or(Error::from(CoreError::PlaneGone))?;
+        let done = remote.ask(command, &mut |sent| {
+            if let proto::Sent::Context(size) = sent {
+                context.set(Some(size));
+            }
+            agentlibre_client::give(sent, &mut report);
+        })?;
         *session = done.session.clone();
         Ok(done)
     };
@@ -114,8 +112,8 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                 }
                 "/remember" => match parse_remember(&message["/remember".len()..]) {
                     Remember::Entry { name, text, workspace } => {
-                        let done = ask(Command::Remember { name, text, workspace }, &mut session)?;
-                        said.tell(done.said.expect("a command's saying")?, lang)?;
+                        let done = ask(Command::Remember { name, text, workspace }, &mut session).map_err(ended)?;
+                        said.tell(of_said(done)?, lang)?;
                     }
                     // The turn form was made a message above.
                     Remember::Usage | Remember::Turn(_) => {
@@ -130,12 +128,12 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                         crate::memory::Error::RemoveNeedsYes { name }.message(lang)
                     )),
                     Ok(MemoryAction::Remove { name, yes: true }) => {
-                        let done = ask(Command::Remove { name }, &mut session)?;
-                        said.tell(done.said.expect("a command's saying")?, lang)?;
+                        let done = ask(Command::Remove { name }, &mut session).map_err(ended)?;
+                        said.tell(of_said(done)?, lang)?;
                     }
                     Ok(action) => {
-                        let done = ask(Command::LookAt(action), &mut session)?;
-                        said.tell(done.said.expect("a command's saying")?, lang)?;
+                        let done = ask(Command::Look(look_of(action)), &mut session).map_err(ended)?;
+                        said.tell(of_said(done)?, lang)?;
                     }
                 },
                 "/attach" => {
@@ -164,8 +162,8 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     if name.is_empty() {
                         said.fail(tr!(lang, m::RENAME_USAGE).to_string());
                     } else {
-                        let done = ask(Command::Rename(name.to_owned()), &mut session)?;
-                        said.tell(done.said.expect("a command's saying")?, lang)?;
+                        let done = ask(Command::Rename(name.to_owned()), &mut session).map_err(ended)?;
+                        said.tell(of_said(done)?, lang)?;
                     }
                 }
                 "/new" => {
@@ -173,15 +171,21 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
                     said = Record::recorded();
                     // A new session records the `run` snapshot of its
                     // Function (AGL-063, D4).
-                    let done = ask(Command::New, &mut session)?;
-                    said.tell(done.said.expect("a command's saying")?, lang)?;
+                    let done = ask(Command::New, &mut session).map_err(ended)?;
+                    said.tell(of_said(done)?, lang)?;
                     pending.clear();
                     placeholders.clear();
                     state = None;
                 }
                 "/compact" => {
-                    let done = ask(Command::Compact { reasoning }, &mut session)?;
-                    let ran = done.said.expect("a command's saying")?;
+                    let done = ask(
+                        Command::Compact {
+                            reasoning: reasoning.map(|level| level.name().to_owned()),
+                        },
+                        &mut session,
+                    )
+                    .map_err(ended)?;
+                    let ran = of_said(done)?;
                     let interrupted = ran.interrupted;
                     said.tell(ran, lang)?;
                     if interrupted {
@@ -200,25 +204,47 @@ pub fn run(setup: Setup) -> Result<ExitCode, Error> {
         let done = ask(
             Command::Say {
                 message: text,
-                attached,
-                reasoning,
-                observer: None,
+                attached: attached.iter().map(crate::plane::wire::attached).collect(),
+                reasoning: reasoning.map(|level| level.name().to_owned()),
             },
             &mut session,
-        )?;
+        );
         state = None;
+        let done = match done {
+            Ok(done) => done,
+            // The daemon went: the session ends.
+            Err(agentlibre_client::Error::Gone) => return Err(ended(agentlibre_client::Error::Gone)),
+            // Another error is the turn's: said, and the next line goes on.
+            Err(error) => {
+                eprintln!("agl: {}", ended(error).message(lang));
+                continue;
+            }
+        };
         let why = done.why.unwrap_or_default();
         match done.turn.expect("a message's turn") {
             Ok(TurnEnd::Answer(text)) => outln!("{text}"),
-            Ok(TurnEnd::Stopped(StopReason::Interrupted)) => {
+            Ok(TurnEnd::Stopped(proto::StopReason::Interrupted)) => {
                 eprintln!("{why}");
                 return Ok(ExitCode::from(interrupt::EXIT_CODE));
             }
             Ok(TurnEnd::Stopped(_)) => eprintln!("agl: {why}"),
-            Err(error) => eprintln!("agl: {}", error.message(lang)),
+            Err(text) => eprintln!("agl: {text}"),
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// A client's error as agl's: what ends the session.
+fn ended(error: agentlibre_client::Error) -> Error {
+    Error::from(CoreError::from(error))
+}
+
+/// What a slash command said; a refusal of the daemon is the error of its
+/// words (AGL-130, D5).
+fn of_said(done: Done) -> Result<Text, Error> {
+    done.said
+        .expect("a command's saying")
+        .map_err(|text| Error::from(CoreError::Said { text }))
 }
 
 /// `path` without one pair of quotes, as a shell or a file manager gives it.
@@ -269,8 +295,8 @@ impl Record {
             interrupted: _,
             record_error,
         } = said;
-        if let Some(error) = record_error {
-            return Err(error.into());
+        if let Some(text) = record_error {
+            return Err(CoreError::Said { text }.into());
         }
         let mut answer = false;
         for told in lines {
@@ -298,19 +324,19 @@ impl Record {
     /// The command's line goes to the session's record, by its plane.
     fn record(
         &self,
-        ask: &mut impl FnMut(Command, &mut SessionView) -> Result<Done, Error>,
+        ask: &mut impl FnMut(Command, &mut SessionView) -> Result<Done, agentlibre_client::Error>,
         session: &mut SessionView,
         line: &str,
     ) -> Result<(), Error> {
         if self.recorded {
             return Ok(());
         }
-        let event = Event::Command(CommandRun {
+        let line = proto::CommandLine {
             line: line.to_owned(),
             failed: self.failed,
             output: Some(self.output.join("\n")).filter(|output| !output.is_empty()),
-        });
-        ask(Command::Append(vec![event]), session).map(drop)
+        };
+        ask(Command::Record(vec![line]), session).map(drop).map_err(ended)
     }
 }
 

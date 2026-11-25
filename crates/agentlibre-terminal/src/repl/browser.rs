@@ -14,7 +14,7 @@ use super::term::{self, Key};
 use super::text::{hard_wrap, truncate};
 use super::ModeKeys;
 use super::Functions;
-use crate::function::catalog::{Entry, Source};
+use agentlibre_proto::{FunctionEntry as Entry, FunctionSource as Source};
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::settings::UserFile;
 use agentlibre_common::style::Role;
@@ -470,11 +470,11 @@ impl Browser {
                     .model
                     .clone()
                     .unwrap_or_else(|| tr!(lang, m::FUNCTION_NO_MODEL).to_string());
-                format!("{}  {model}", entry.kind.name())
+                format!("{}  {model}", entry.kind)
             }
         };
         let line = truncate(
-            &format!("{mark} {:<22} {:<9}{rest}", entry.name, entry.source.label(lang)),
+            &format!("{mark} {:<22} {:<9}{rest}", entry.name, crate::records::source_label(entry.source, lang)),
             columns,
         );
         let role = if entry.error.is_some() {
@@ -720,12 +720,21 @@ mod tests {
         catalog
     }
 
+    /// The Functions of the catalog, as the wire lists them (AGL-130, D12).
+    fn entries(catalog: &Catalog) -> Vec<Entry> {
+        catalog
+            .entries(Lang::En)
+            .into_iter()
+            .map(crate::plane::wire::function_entry)
+            .collect()
+    }
+
     fn builtin(name: &str) -> Entry {
         Entry {
             name: name.into(),
             source: Source::BuiltIn,
             shadows: Vec::new(),
-            kind: agentlibre_common::settings::ServerKind::Llama,
+            kind: "llama".into(),
             model: Some("m.gguf".into()),
             description: None,
             error: None,
@@ -795,7 +804,7 @@ mod tests {
             .iter()
             .position(|e| e.current)
             .unwrap();
-        let browser = Browser::new(catalog.entries(Lang::En));
+        let browser = Browser::new(entries(&catalog));
         assert_eq!(browser.at, current);
         assert_eq!(browser.name(), Some("mine"));
     }
@@ -804,7 +813,7 @@ mod tests {
     fn a_key_the_browser_does_not_take_belongs_to_the_input() {
         let dir = TempDir::new();
         let catalog = fixture(&dir.0);
-        let browser = Browser::new(catalog.entries(Lang::En));
+        let browser = Browser::new(entries(&catalog));
         assert!(!browser.takes(&Key::Char('x')));
         assert!(browser.takes(&Key::Char('j')));
         assert!(browser.takes(&Key::Up));
@@ -815,10 +824,10 @@ mod tests {
     fn a_switch_is_asked_only_when_the_thread_is_free() {
         let dir = TempDir::new();
         let catalog = fixture(&dir.0);
-        let mut browser = Browser::new(catalog.entries(Lang::En));
+        let mut browser = Browser::new(entries(&catalog));
         assert!(matches!(browser.key(Key::Char('s'), &catalog, &[], Lang::En, false), KeyOutcome::Switch(name) if name == "mine"));
         // The turn answers first, as `/function <name>` does.
-        let mut browser = Browser::new(catalog.entries(Lang::En));
+        let mut browser = Browser::new(entries(&catalog));
         assert!(matches!(browser.key(Key::Char('s'), &catalog, &[], Lang::En, true), KeyOutcome::Stay));
         // The words of `/function` on a busy thread (AGL-036, D9).
         assert!(hint(&browser, &[]).contains("Ctrl-F"));
@@ -838,7 +847,7 @@ mod tests {
     fn the_clone_asks_a_name_and_writes_the_copy() {
         let dir = TempDir::new();
         let catalog = fixture(&dir.0);
-        let mut browser = Browser::new(catalog.entries(Lang::En));
+        let mut browser = Browser::new(entries(&catalog));
         press(&mut browser, &catalog, &[Key::Char('c')]);
         // The row of keys became the question.
         assert!(hint(&browser, &[]).contains("clone `mine` as:"), "{}", hint(&browser, &[]));
@@ -855,7 +864,7 @@ mod tests {
     fn an_empty_clone_name_writes_nothing() {
         let dir = TempDir::new();
         let catalog = fixture(&dir.0);
-        let mut browser = Browser::new(catalog.entries(Lang::En));
+        let mut browser = Browser::new(entries(&catalog));
         press(&mut browser, &catalog, &[Key::Char('c'), Key::Enter]);
         assert!(!hint(&browser, &[]).contains("cloned"));
     }
@@ -864,7 +873,7 @@ mod tests {
     fn a_delete_asks_twice_and_erases_the_file() {
         let dir = TempDir::new();
         let catalog = fixture(&dir.0);
-        let mut browser = Browser::new(catalog.entries(Lang::En));
+        let mut browser = Browser::new(entries(&catalog));
         press(&mut browser, &catalog, &[Key::Char('d')]);
         assert!(hint(&browser, &[]).contains("delete mine?"), "{}", hint(&browser, &[]));
         // Any other key keeps the file, and its answer spends the question.
@@ -889,7 +898,7 @@ mod tests {
     fn what_the_editor_left_rules_the_row() {
         let dir = TempDir::new();
         let catalog = fixture(&dir.0);
-        let mut browser = Browser::new(catalog.entries(Lang::En));
+        let mut browser = Browser::new(entries(&catalog));
         browser.note_edited(
             "mine",
             Edited::Saved { check: "mine: loads, llama, p.gguf, 4096 of context".into(), error: false },
@@ -909,7 +918,7 @@ mod tests {
         let dir = TempDir::new();
         let catalog = fixture(&dir.0);
         let items = vec![setting(&dir.0.join("settings.nix"))];
-        let mut browser = Browser::new(catalog.entries(Lang::En));
+        let mut browser = Browser::new(entries(&catalog));
         browser.key(Key::Tab, &catalog, &items, Lang::En, false);
         assert!(browser.settings);
         let lines = browser.lines(&Theme::plain(), Lang::En, 80, 10, &items);
@@ -925,7 +934,7 @@ mod tests {
         let catalog = fixture(&dir.0);
         let path = dir.0.join("settings.nix");
         fs::write(&path, r#"{ agl, ... }: { function = "mine"; language = "en"; }"#).unwrap();
-        let mut browser = Browser::new(catalog.entries(Lang::En));
+        let mut browser = Browser::new(entries(&catalog));
         browser.settings = true;
         browser.note_settings_edited(&path, Edited::Saved { check: String::new(), error: false }, Lang::En);
         assert!(hint(&browser, &[]).contains("it loads"), "{}", hint(&browser, &[]));
@@ -939,7 +948,7 @@ mod tests {
     fn the_enter_shows_the_source_and_the_arrows_walk_it() {
         let dir = TempDir::new();
         let catalog = fixture(&dir.0);
-        let mut browser = Browser::new(catalog.entries(Lang::En));
+        let mut browser = Browser::new(entries(&catalog));
         assert!(matches!(browser.key(Key::Enter, &catalog, &[], Lang::En, false), KeyOutcome::Stay));
         let lines = browser.lines(&Theme::plain(), Lang::En, 40, 6, &[]);
         assert!(lines.iter().any(|l| l.contains("policy")), "the source shows: {lines:?}");

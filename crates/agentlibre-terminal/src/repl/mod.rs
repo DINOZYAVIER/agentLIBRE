@@ -32,14 +32,14 @@ use card::{notice_lines, user_lines};
 use transcript::{Presenter, Screen};
 
 use crate::Setup;
-use crate::agent::{Report, Sink, TurnEnd};
-use crate::plane::{Command, Done, Sent, Told};
-use crate::plane::Turn;
+use agentlibre_client::{Command, Surface};
+use agentlibre_proto::{self as proto, CommandLine, Done, Event, PhaseTime, Report, Sent, StopReason, Told, TurnEnd};
+
 use crate::attach::Pending;
 use agentlibre_common::reasoning::ReasoningLevel;
 pub use functions::Functions;
 use agentlibre_common::paths::Paths;
-use crate::cli::args::{MemoryAction, memory_action};
+use crate::cli::args::{MemoryAction, look_of, memory_action};
 use agentlibre_common::tty::is_yes;
 use crate::whisper;
 use crate::error::Error;
@@ -48,7 +48,6 @@ use crate::i18n::repl as texts;
 use agentlibre_common::i18n::{Lang, m};
 use crate::interrupt;
 use crate::media::{self, Clip, Kind, Source};
-use crate::session::{CommandRun, Event, StopReason, TransitionLine};
 use crate::status::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
@@ -75,7 +74,7 @@ struct Inner {
     media_counts: [u32; 3],
     /// Commands run at the prompt, for the main thread to record in the
     /// session it holds (AGL-047, D5).
-    commands: Vec<CommandRun>,
+    commands: Vec<CommandLine>,
     /// A turn is running.
     running: bool,
     /// What the input thread asks of the main thread, taken in the order of
@@ -331,7 +330,7 @@ struct Text {
 struct InspectData {
     id: String,
     events: Vec<Event>,
-    transitions: Vec<TransitionLine>,
+    transitions: Vec<PhaseTime>,
     outputs: PathBuf,
 }
 
@@ -457,7 +456,7 @@ impl Input {
         // silence is a result too. What went to the main thread is recorded
         // there, with its result (AGL-047, D5).
         if !handed {
-            self.control.lock().commands.push(CommandRun {
+            self.control.lock().commands.push(CommandLine {
                 line: trimmed.to_owned(),
                 failed: said.failed,
                 output: Some(said.lines.join("\n")).filter(|output| !output.is_empty()),
@@ -470,7 +469,7 @@ impl Input {
     fn declined(&self, question: Question) {
         let text = tr!(self.lang, m::MEMORY_NOT_REMOVED, name = question.name);
         self.notice(&text, Notice::Info);
-        self.control.lock().commands.push(CommandRun {
+        self.control.lock().commands.push(CommandLine {
             line: question.line,
             failed: false,
             output: Some(text),
@@ -976,7 +975,7 @@ fn show(presenter: &mut Presenter, control: &Control, report: Report) {
     if let Report::Event(Event::State(state)) = &report {
         control.set_state(Some(state.clone()));
     }
-    presenter.send(report);
+    presenter.report(report);
 }
 
 /// A turn of the REPL: its reports are drawn, what the start says is shown
@@ -987,13 +986,11 @@ struct ReplTurn<'a> {
     dock: &'a Dock,
 }
 
-impl Sink for ReplTurn<'_> {
-    fn send(&mut self, report: Report) {
+impl Surface for ReplTurn<'_> {
+    fn report(&mut self, report: Report) {
         show(self.presenter, self.control, report);
     }
-}
 
-impl Turn for ReplTurn<'_> {
     fn line(&mut self, line: &str) {
         self.presenter.show_notice(line, Role::Muted);
     }
@@ -1055,12 +1052,12 @@ pub enum End {
 /// A slash command goes to the session (AGL-047, D5). A session that cannot
 /// be written to says so at the next event of the turn.
 /// The line of a command run at the prompt, for the session's record.
-fn command(line: String, failed: bool, output: Option<String>) -> Event {
-    Event::Command(CommandRun {
+fn command(line: String, failed: bool, output: Option<String>) -> CommandLine {
+    CommandLine {
         line,
         failed,
         output,
-    })
+    }
 }
 
 /// A command sent to the plane and its end; `None` when the plane's thread is
@@ -1075,16 +1072,14 @@ fn said(
     presenter: &Presenter,
     run: Command,
     line: String,
-    lang: Lang,
 ) -> bool {
     match ask(run, &mut drop).and_then(|done| done.said) {
         Some(Ok(said)) => {
             let (failed, output) = (said.failed, said.content.clone());
-            show_said(presenter, &said, lang);
+            show_said(presenter, &said);
             record(line, failed, output)
         }
-        Some(Err(error)) => {
-            let text = error.message(lang);
+        Some(Err(text)) => {
             presenter.show_notice(&text, Role::StatusFailure);
             record(line, true, Some(text))
         }
@@ -1095,7 +1090,7 @@ fn said(
 /// What a command of the run said (AGL-067, F2): an answer and a notice
 /// muted, a refusal and an error's text as a failure, a command cut short
 /// pending, and the memory line of an entry the command wrote.
-fn show_said(presenter: &Presenter, said: &crate::plane::Text, lang: Lang) {
+fn show_said(presenter: &Presenter, said: &proto::Text) {
     for told in &said.lines {
         let (text, role) = match told {
             Told::Output(text) | Told::Notice(text) => (text, Role::Muted),
@@ -1107,19 +1102,15 @@ fn show_said(presenter: &Presenter, said: &crate::plane::Text, lang: Lang) {
     if let Some(write) = &said.memory {
         presenter.show_memory(&write.name, write.kind, write.text.as_deref());
     }
-    if let Some(error) = &said.record_error {
-        let text = error.message(lang);
-        presenter.show_notice(&text, Role::StatusFailure);
+    if let Some(text) = &said.record_error {
+        presenter.show_notice(text, Role::StatusFailure);
     }
 }
 
 /// The commands run at the prompt go to the session between turns, so that
 /// none stands between a call and its result (AGL-047, D5).
-fn take_commands(control: &Control) -> Vec<Event> {
+fn take_commands(control: &Control) -> Vec<CommandLine> {
     std::mem::take(&mut control.lock().commands)
-        .into_iter()
-        .map(Event::Command)
-        .collect()
 }
 
 /// What the main thread waits for at the prompt; `poll` runs every time
@@ -1237,7 +1228,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     control.lock().media_counts = opened.session.media;
     // What the session holds, and what its turn is writing when it is
     // another client's (AGL-126, D10).
-    let (events, transitions, writing) = remote.past()?;
+    let (events, transitions, writing) = remote.past().map_err(CoreError::from)?;
     // The live draft engine of the dictation (AGL-122, D5), when the
     // daemon found both program and model.
     let draft: Option<Arc<dyn DraftEngine>> = opened.draft.map(|spec| {
@@ -1389,10 +1380,10 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     if resumed {
         presenter.replay(&events, &transitions);
         if !writing.thinking.is_empty() {
-            presenter.send(Report::Thinking(writing.thinking));
+            presenter.report(Report::Thinking(writing.thinking));
         }
         if !writing.text.is_empty() {
-            presenter.send(Report::ActionText(writing.text));
+            presenter.report(Report::ActionText(writing.text));
         }
         if let Some(state) = opened.session.unfinished.clone() {
             control.lock().info.unfinished = Some(state.clone());
@@ -1416,8 +1407,8 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             Sent::Report(report) => show(&mut presenter, &control, report),
             _ => {}
         });
-        if let Some(Some(Err(error))) = done.map(|done| done.said) {
-            presenter.show_notice(&error.message(lang), Role::StatusFailure);
+        if let Some(Some(Err(text))) = done.map(|done| done.said) {
+            presenter.show_notice(&text, Role::StatusFailure);
         }
         control.lock().running = false;
         presenter.set_ready();
@@ -1426,11 +1417,30 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     // What the REPL keeps beside the plane: what its session is after each
     // command.
     let plane_name = opened.session.plane.clone();
-    let session = RefCell::new(agentlibre_core::plane::wire::view_of(opened.session.clone()));
+    let session = RefCell::new(opened.session.clone());
     // The plane takes the commands in the daemon (AGL-076, D5).
-    // A command and its end; `None` when the daemon is gone.
+    // A command and its end; `None` when the daemon is gone. Any other error
+    // is the command's own, shown as its error, and the REPL goes on (AGL-130,
+    // D5).
     let ask = |command: Command, each: &mut dyn FnMut(Sent)| -> Option<Done> {
-        let done = remote.ask(command, each)?;
+        let turn = matches!(command, Command::Say { .. });
+        let done = match remote.ask(command, each) {
+            Ok(done) => done,
+            Err(agentlibre_client::Error::Gone) => return None,
+            Err(error) => {
+                let text = Error::from(CoreError::from(error)).message(lang);
+                let (turn, said) = if turn { (Some(Err(text)), None) } else { (None, Some(Err(text))) };
+                Done {
+                    turn,
+                    why: None,
+                    said,
+                    session: proto::SessionView {
+                        id: remote.session(),
+                        ..proto::SessionView::default()
+                    },
+                }
+            }
+        };
         *session.borrow_mut() = done.session.clone();
         Some(done)
     };
@@ -1444,18 +1454,18 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         let next = wait_for_next(&control, &mut || {
             while let Some(what) = remote.at_prompt() {
                 match what {
-                    agentlibre_core::client::AtPrompt::Sent(sent) => {
+                    agentlibre_client::AtPrompt::Sent(sent) => {
                         if !foreign {
                             presenter.begin_turn();
                             foreign = true;
                         }
-                        sent.give(&mut ReplTurn {
+                        agentlibre_client::give(sent, &mut ReplTurn {
                             presenter: &mut presenter,
                             control: &control,
                             dock: &dock,
                         });
                     }
-                    agentlibre_core::client::AtPrompt::OtherDone => {
+                    agentlibre_client::AtPrompt::OtherDone => {
                         presenter.close();
                         presenter.set_ready();
                         foreign = false;
@@ -1469,7 +1479,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             foreign = false;
         }
         let commands = take_commands(&control);
-        if !commands.is_empty() && ask(Command::Append(commands), &mut drop).is_none() {
+        if !commands.is_empty() && ask(Command::Record(commands), &mut drop).is_none() {
             gone = true;
             break;
         }
@@ -1478,12 +1488,14 @@ pub fn run(setup: Setup) -> Result<End, Error> {
         {
             let mut inner = inspect_data.lock().unwrap();
             inner.id = session.borrow().id.clone();
-            inner.events = session.borrow().events.clone();
-            inner.outputs = session.borrow().outputs.clone();
+            // The wire's view of a session holds no events: the fallback has
+            // none after a command, as it had none before (AGL-130).
+            inner.events = Vec::new();
+            inner.outputs = PathBuf::from(&session.borrow().outputs);
         }
         // The command's line in the session's record (AGL-047, D5).
         let record = |line: String, failed: bool, output: Option<String>| {
-            ask(Command::Append(vec![command(line, failed, output)]), &mut drop).is_some()
+            ask(Command::Record(vec![command(line, failed, output)]), &mut drop).is_some()
         };
         let kept = match next {
             Next::Quit => {
@@ -1493,10 +1505,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             Next::Functions => {
                 let list = stores
                     .entries()
-                    .map(|entries| {
-                        let entries: Vec<_> = entries.into_iter().map(crate::plane::wire::function_entry).collect();
-                        crate::records::function_lines(&entries, lang).join("\n")
-                    });
+                    .map(|entries| crate::records::function_lines(&entries, lang).join("\n"));
                 match list {
                     Ok(list) => {
                         presenter.show_notice(&list, Role::Muted);
@@ -1573,7 +1582,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 }
                 match ask(Command::New, &mut drop).and_then(|done| done.said) {
                     Some(Ok(said)) => {
-                        show_said(&presenter, &said, lang);
+                        show_said(&presenter, &said);
                         let mut inner = control.lock();
                         inner.info = Info {
                             session: session.borrow().id.clone(),
@@ -1583,8 +1592,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                         inner.media_counts = session.borrow().media;
                         true
                     }
-                    Some(Err(error)) => {
-                        let text = error.message(lang);
+                    Some(Err(text)) => {
                         presenter.show_notice(&text, Role::StatusFailure);
                         true
                     }
@@ -1595,7 +1603,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 // `/rename <name>` (AGL-062, D7): the name is a line of the
                 // file. The model has the command from its record (AGL-047,
                 // D5), as with the others.
-                said(&ask, &record, &presenter, Command::Rename(name.clone()), format!("/rename {name}"), lang)
+                said(&ask, &record, &presenter, Command::Rename(name.clone()), format!("/rename {name}"))
             }
             Next::Remember(name, text, workspace) => {
                 // `/remember name | text` (AGL-006, M34, M37): the program
@@ -1603,20 +1611,20 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 // record of the command (AGL-047, D5).
                 let flag = if workspace { "--workspace " } else { "" };
                 let line = format!("/remember {flag}{name} | {text}");
-                said(&ask, &record, &presenter, Command::Remember { name, text, workspace }, line, lang)
+                said(&ask, &record, &presenter, Command::Remember { name, text, workspace }, line)
             }
             // Without `--yes`, the question: the removal comes back with the
             // answer, and the record with it (AGL-060, D7).
             Next::Memory(line, MemoryAction::Remove { name, yes: false }) => {
                 // The entry must be there before the question (AGL-060, D7).
-                let found = match ask(Command::LookAt(MemoryAction::Show { name: name.clone() }), &mut drop) {
+                let found = match ask(Command::Look(proto::Look::Show { name: name.clone() }), &mut drop) {
                     Some(done) => match done.said {
                         Some(Ok(said)) if !said.failed => Ok(()),
                         Some(Ok(said)) => Err(said.lines.iter().find_map(|told| match told {
                             Told::Fault(text) | Told::Refusal(text) => Some(text.clone()),
                             _ => None,
                         }).unwrap_or_default()),
-                        Some(Err(error)) => Err(error.message(lang)),
+                        Some(Err(text)) => Err(text),
                         None => Ok(()),
                     },
                     None => Err(CoreError::PlaneGone.message(lang)),
@@ -1637,14 +1645,14 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             // The model learns of it from the record, as of `/remember`
             // (AGL-060, D6).
             Next::Memory(line, MemoryAction::Remove { name, yes: true }) => {
-                said(&ask, &record, &presenter, Command::Remove { name }, line, lang)
+                said(&ask, &record, &presenter, Command::Remove { name }, line)
             }
             Next::Memory(line, action) => {
-                said(&ask, &record, &presenter, Command::LookAt(action), line, lang)
+                said(&ask, &record, &presenter, Command::Look(look_of(action)), line)
             }
             Next::Compact => {
                 let reasoning = control.lock().reasoning;
-                let done = ask(Command::Compact { reasoning }, &mut |sent| {
+                let done = ask(Command::Compact { reasoning: reasoning.map(|level| level.name().to_owned()) }, &mut |sent| {
                     if let Sent::Report(report) = sent {
                         show(&mut presenter, &control, report);
                     }
@@ -1653,11 +1661,11 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 let kept = match done.and_then(|done| done.said) {
                     Some(Ok(said)) => {
                         let (failed, output) = (said.failed, said.content.clone());
-                        show_said(&presenter, &said, lang);
+                        show_said(&presenter, &said);
                         record("/compact".into(), failed, output)
                     }
-                    Some(Err(error)) => {
-                        presenter.show_notice(&error.message(lang), Role::StatusFailure);
+                    Some(Err(text)) => {
+                        presenter.show_notice(&text, Role::StatusFailure);
                         true
                     }
                     None => false,
@@ -1677,12 +1685,11 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 let done = ask(
                     Command::Say {
                         message,
-                        attached: pending,
-                        reasoning,
-                        observer: None,
+                        attached: pending.iter().map(crate::plane::wire::attached).collect(),
+                        reasoning: reasoning.map(|level| level.name().to_owned()),
                     },
                     &mut |sent| {
-                        sent.give(&mut ReplTurn {
+                        agentlibre_client::give(sent, &mut ReplTurn {
                             presenter: &mut presenter,
                             control: &control,
                             dock: &dock,
@@ -1701,7 +1708,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                             .show_notice(tr!(lang, m::INTERRUPTED_CLEARED), Role::StatusPending);
                     }
                     Ok(TurnEnd::Stopped(_)) => failed = done.why,
-                    Err(error) => failed = Some(error.message(lang)),
+                    Err(text) => failed = Some(text),
                 }
                 let mut inner = control.lock();
                 inner.running = false;
@@ -1732,7 +1739,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
 
     let commands = take_commands(&control);
     if !gone && !commands.is_empty() {
-        ask(Command::Append(commands), &mut drop);
+        ask(Command::Record(commands), &mut drop);
     }
     done.store(true, Ordering::SeqCst);
     let _ = reader.join();
@@ -2535,7 +2542,7 @@ mod tests {
             let commands = std::mem::take(&mut f.inner().commands);
             assert_eq!(
                 commands,
-                [CommandRun {
+                [CommandLine {
                     line: "/memory remove tea".into(),
                     failed: false,
                     output: Some("not removed: tea".into()),
@@ -2838,7 +2845,7 @@ mod tests {
         fn erase(&self, _count: usize) -> bool {
             true
         }
-        fn activity(&self, _activity: crate::phase::Phase) {}
+        fn activity(&self, _activity: proto::Phase) {}
     }
 
     #[test]
