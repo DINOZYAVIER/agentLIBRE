@@ -82,7 +82,7 @@ impl Daemon {
                             // The server's start follows the reply, so that
                             // the client has the session before its reports.
                             if start {
-                                let _ = self.command(client, &id, |_| Command::Start, true);
+                                let _ = self.command(client, &id, |_| Command::Start, true, false);
                             }
                         }
                         Err(error) => self.send_to(client, &Reply::Refused { error: error.message(lang) }),
@@ -133,13 +133,12 @@ impl Daemon {
             } => {
                 let attached = attached.into_iter().filter_map(wire::attached_of).collect();
                 let reasoning = reasoning.as_deref().and_then(ReasoningLevel::parse);
-                self.command(client, &session, |entry| Command::Say {
+                self.accept(client, &session, |entry| Command::Say {
                     message,
                     attached,
                     reasoning,
                     observer: entry.observer.take(),
-                }, true)
-                .map_or_else(refused, |()| Some(Reply::Ok))
+                }, true, lang)
             }
             // `stop` and `answer` have no reply: a client sends them from any
             // of its threads while another waits for a reply.
@@ -167,8 +166,7 @@ impl Daemon {
             Request::New { session } => self.plain(client, &session, Command::New, lang),
             Request::Compact { session, reasoning } => {
                 let reasoning = reasoning.as_deref().and_then(ReasoningLevel::parse);
-                self.command(client, &session, |_| Command::Compact { reasoning }, true)
-                    .map_or_else(refused, |()| Some(Reply::Ok))
+                self.accept(client, &session, |_| Command::Compact { reasoning }, true, lang)
             }
             Request::Record { session, lines } => {
                 let events = lines
@@ -201,7 +199,7 @@ impl Daemon {
             // one it runs (AGL-073, D10).
             Request::History { session } => {
                 let (to, from) = mpsc::channel();
-                if let Err(error) = self.command(client, &session, |_| Command::History(to), false) {
+                if let Err(error) = self.command(client, &session, |_| Command::History(to), false, false) {
                     return refused(error);
                 }
                 thread::spawn(move || {

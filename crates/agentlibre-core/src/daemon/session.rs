@@ -7,21 +7,35 @@ use super::flow::Message;
 impl Daemon {
     /// A command that is not a turn.
     pub(super) fn plain(&self, client: u64, session: &str, command: Command, lang: Lang) -> Option<Reply> {
-        let mut command = Some(command);
-        Some(match self.command(client, session, |_| command.take().expect("one command"), false) {
-            Ok(()) => Reply::Ok,
-            Err(error) => Reply::Refused { error: error.message(lang) },
-        })
+        self.accept(client, session, |_| command, false, lang)
+    }
+
+    /// Sends the run `client`'s command and answers it: `Ok`, before anything
+    /// the command does can be told, its end too; a refusal is the reply.
+    pub(super) fn accept(
+        &self,
+        client: u64,
+        session: &str,
+        make: impl FnOnce(&mut Entry) -> Command,
+        busy: bool,
+        lang: Lang,
+    ) -> Option<Reply> {
+        match self.command(client, session, make, busy, true) {
+            Ok(()) => None,
+            Err(error) => Some(Reply::Refused { error: error.message(lang) }),
+        }
     }
 
     /// Sends the session's run the command `make` gives; `busy` marks a
-    /// turn until its end.
+    /// turn until its end; `answer` says `Ok` to the client under the lock
+    /// that `tell` sends under.
     pub(super) fn command(
         &self,
         client: u64,
         session: &str,
         make: impl FnOnce(&mut Entry) -> Command,
         busy: bool,
+        answer: bool,
     ) -> Result<(), Error> {
         let mut state = self.lock();
         let entry = state
@@ -32,6 +46,9 @@ impl Daemon {
         entry.commands.send(command).map_err(|_| Error::PlaneGone)?;
         entry.busy |= busy;
         entry.origins.push_back(client);
+        if answer && let Some(client) = state.clients.get(&client) {
+            write(&client.out, &Reply::Ok);
+        }
         Ok(())
     }
 

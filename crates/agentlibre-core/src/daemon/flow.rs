@@ -505,7 +505,7 @@ mod tests {
         })) else {
             panic!("not opened");
         };
-        let Reply::Text { said, .. } = client.ask(&Request::Flow {
+        let Reply::Text { said, .. } = client.answer(&Request::Flow {
             plane: "work".into(),
             verb: proto::FlowVerb::Start { name: "talk".into() },
         }) else {
@@ -565,7 +565,7 @@ mod tests {
         })) else {
             panic!("not opened");
         };
-        let Reply::Text { .. } = client.ask(&Request::Flow {
+        let Reply::Text { .. } = client.answer(&Request::Flow {
             plane: "work".into(),
             verb: proto::FlowVerb::Start { name: "talk".into() },
         }) else {

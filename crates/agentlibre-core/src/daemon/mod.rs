@@ -333,6 +333,15 @@ mod tests {
             self.next()
         }
 
+        /// The reply to `request`, past what is told unasked meanwhile.
+        pub(super) fn answer(&mut self, request: &Request) -> Reply {
+            let mut reply = self.ask(request);
+            while matches!(reply, Reply::Sent { .. } | Reply::Done { .. }) {
+                reply = self.next();
+            }
+            reply
+        }
+
         /// The next reply that is not a line told while a run opens.
         pub(super) fn next(&mut self) -> Reply {
             loop {
