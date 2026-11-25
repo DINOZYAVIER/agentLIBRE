@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use agentlibre_common::i18n::Lang;
 use agentlibre_common::paths::Paths;
-use crate::remote;
+use agentlibre_surface::daemon;
 use agentlibre_proto::{Reply, Request};
 
 use crate::error::{CoreError, Error};
@@ -14,7 +14,7 @@ use crate::error::{CoreError, Error};
 pub fn run(session: &str, message: &str, paths: &Paths, cwd: &Path, lang: Lang) -> Result<ExitCode, Error> {
     // No human answers here: a question of the turn waits for whoever opens
     // the session (D7).
-    let client = remote::connect(paths, false, lang, true)?;
+    let client = daemon::connect(paths, false, lang, true)?;
     let id = id_of(&client, session, cwd)?;
     let request = Request::Say {
         session: id,

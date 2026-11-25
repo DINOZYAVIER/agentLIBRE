@@ -7,6 +7,7 @@
 pub mod attach;
 pub mod clipboard;
 pub mod commands;
+pub mod daemon;
 mod error;
 pub mod record;
 pub mod records;

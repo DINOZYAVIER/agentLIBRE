@@ -5,6 +5,7 @@ mod browser;
 mod card;
 mod dock;
 mod editor;
+#[cfg(test)]
 mod functions;
 mod inspect;
 mod markdown;
@@ -37,7 +38,7 @@ use agentlibre_proto::{self as proto, CommandLine, Done, Event, PhaseTime, Repor
 
 use agentlibre_common::media::{Kind, Pending, Source};
 use agentlibre_common::reasoning::ReasoningLevel;
-pub use functions::Functions;
+pub use agentlibre_surface::daemon::Functions;
 use agentlibre_common::paths::Paths;
 use agentlibre_surface::commands::{Memory, look_of, memory};
 use agentlibre_common::tty::is_yes;
@@ -1278,14 +1279,14 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                     inner.outputs.clone(),
                 )
             };
-            let follower = crate::remote::Follower::of(&paths, lang, &id).ok();
+            let follower = agentlibre_surface::daemon::Follower::of(&paths, lang, &id).ok();
             let (events, transitions) = follower
                 .as_ref()
                 .and_then(|follower| follower.past().ok())
                 .unwrap_or(kept);
             // The mode follows the session while the agent works (AGL-113,
             // D1): an empty read asks whether it grew.
-            let poll = || follower.as_ref().and_then(crate::remote::Follower::grown);
+            let poll = || follower.as_ref().and_then(agentlibre_surface::daemon::Follower::grown);
             // The dock's rows of the moment (D14): the input prompt
             // stays on the alternate screen, and its rows come anew at
             // each redraw (AGL-098, D7).
@@ -1951,13 +1952,13 @@ mod tests {
                 plane: None,
                 server: "http://127.0.0.1:18080".into(),
             },
-            functions: Arc::new(crate::function::catalog::Catalog {
+            functions: Arc::new(functions::Fixture(crate::function::catalog::Catalog {
                 plane_dir: None,
                 workspace_dir: dir.join("functions"),
                 user_dir: dir.join("user"),
                 settings: agentlibre_common::settings::ServerFile::default(),
                 current: "minimal".into(),
-            }),
+            })),
             theme: Theme::plain(),
             lang: Lang::En,
             history_file: dir.join("history.jsonl"),

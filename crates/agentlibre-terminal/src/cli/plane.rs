@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use crate::remote;
+use agentlibre_surface::daemon;
 use agentlibre_proto::{self as proto, Reply, Request};
 
 use crate::cli::args::PlaneAction;
@@ -131,7 +131,7 @@ fn flows(
     };
     // A flow turns on a session's plane thread, so the daemon must already
     // run; it is not started from here, with no session to turn.
-    let client = remote::connect(paths, false, lang, false)?;
+    let client = daemon::connect(paths, false, lang, false)?;
     let many = planes.len() > 1;
     planes
         .iter()

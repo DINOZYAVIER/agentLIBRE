@@ -694,6 +694,7 @@ mod tests {
     use super::*;
     use super::super::dock::Layout;
     use crate::function::catalog::Catalog;
+    use crate::repl::functions::Fixture;
     use agentlibre_common::testutil::TempDir;
     use agentlibre_common::settings::ServerFile;
 
@@ -705,7 +706,7 @@ mod tests {
     }
 
     /// Two user Functions, `mine` the current one; the order of `entries`.
-    fn fixture(dir: &Path) -> Catalog {
+    fn fixture(dir: &Path) -> Fixture {
         let catalog = Catalog {
             plane_dir: None,
             workspace_dir: dir.join("workspace"),
@@ -717,12 +718,13 @@ mod tests {
         for name in ["mine", "other"] {
             fs::write(catalog.user_dir.join(format!("{name}.nix")), file()).unwrap();
         }
-        catalog
+        Fixture(catalog)
     }
 
     /// The Functions of the catalog, as the wire lists them (AGL-130, D12).
-    fn entries(catalog: &Catalog) -> Vec<Entry> {
+    fn entries(catalog: &Fixture) -> Vec<Entry> {
         catalog
+            .0
             .entries(Lang::En)
             .into_iter()
             .map(crate::plane::wire::function_entry)
@@ -750,7 +752,7 @@ mod tests {
         }
     }
 
-    fn press(browser: &mut Browser, catalog: &Catalog, keys: &[Key]) -> KeyOutcome {
+    fn press(browser: &mut Browser, catalog: &Fixture, keys: &[Key]) -> KeyOutcome {
         let mut last = KeyOutcome::Stay;
         for key in keys {
             last = browser.key(key.clone(), catalog, &[], Lang::En, false);
@@ -800,6 +802,7 @@ mod tests {
         let catalog = fixture(&dir.0);
         // The cursor stands on the current one, wherever it sorts.
         let current = catalog
+            .0
             .entries(Lang::En)
             .iter()
             .position(|e| e.current)

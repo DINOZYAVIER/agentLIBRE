@@ -81,7 +81,7 @@ pub struct Setup {
     pub history_file: PathBuf,
     /// The Functions of the REPL's `/function` (AGL-036, D3) and the planes
     /// of its `/plane` (AGL-077, D12), by the daemon (AGL-126, D2).
-    pub stores: Arc<remote::Stores>,
+    pub stores: Arc<agentlibre_surface::daemon::Stores>,
     /// agentLIBRE's directories, for the settings of Ctrl-F (AGL-109, D6) and
     /// the daemon's socket.
     pub paths: Paths,
@@ -347,7 +347,7 @@ fn agent_session(
     let Some(message) = args.prompt.clone() else {
         // No `-p`: the interactive session (D136).
         let plane = opened.session.plane.clone();
-        let stores = Arc::new(remote::Stores {
+        let stores = Arc::new(agentlibre_surface::daemon::Stores {
             paths: paths.clone(),
             lang,
             dir: opened.workspace.clone(),
