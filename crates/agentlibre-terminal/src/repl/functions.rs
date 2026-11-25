@@ -65,4 +65,61 @@ mod tests {
             Catalog::delete(self, name).map(drop)
         }
     }
+
+    /// The Functions of the list, as the core and as the wire have them.
+    fn entries() -> (Vec<crate::function::catalog::Entry>, Vec<agentlibre_proto::FunctionEntry>) {
+        use crate::function::catalog::{Entry, Source};
+        use agentlibre_common::settings::ServerKind;
+        let make = || {
+            vec![
+                Entry {
+                    name: "minimal".into(),
+                    source: Source::BuiltIn,
+                    shadows: vec![Source::User, Source::Workspace],
+                    kind: ServerKind::Llama,
+                    model: Some("m.gguf".into()),
+                    description: Some("the smallest".into()),
+                    error: None,
+                    current: true,
+                },
+                Entry {
+                    name: "my-own-function".into(),
+                    source: Source::Plane,
+                    shadows: Vec::new(),
+                    kind: ServerKind::Llama,
+                    model: None,
+                    description: None,
+                    error: None,
+                    current: false,
+                },
+                Entry {
+                    name: "broken".into(),
+                    source: Source::Workspace,
+                    shadows: Vec::new(),
+                    kind: ServerKind::Llama,
+                    model: None,
+                    description: None,
+                    error: Some("it does not load".into()),
+                    current: false,
+                },
+            ]
+        };
+        (
+            make(),
+            make().into_iter().map(crate::plane::wire::function_entry).collect(),
+        )
+    }
+
+    #[test]
+    fn the_functions_of_the_wire_are_listed_as_the_catalog_lists_them() {
+        // AGL-130, D10: the same lines in every language.
+        let (core, wire) = entries();
+        for lang in [Lang::En, Lang::Uk] {
+            assert_eq!(
+                agentlibre_surface::records::function_lines(&wire, lang),
+                crate::function::catalog::lines(&core, lang)
+            );
+        }
+        assert!(agentlibre_surface::records::function_lines(&wire, Lang::En)[0].starts_with("* minimal"));
+    }
 }

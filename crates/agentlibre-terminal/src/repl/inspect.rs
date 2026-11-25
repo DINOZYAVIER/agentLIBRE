@@ -20,12 +20,12 @@ use super::ModeKeys;
 use agentlibre_proto::ToolCall;
 use agentlibre_surface::words as texts;
 use agentlibre_common::i18n::{Lang, m};
-use crate::records::{self, BlockKind, Record};
+use agentlibre_surface::records::{self, BlockKind, Record};
 use agentlibre_proto::{Event, PhaseTime};
 use agentlibre_common::settings::Detail;
 use agentlibre_common::style::Role;
 use crate::theme::Theme;
-use crate::records::ToolResult;
+use agentlibre_surface::records::ToolResult;
 use agentlibre_common::tr;
 
 /// The rows the screen keeps for the blank one and the hint (D8).

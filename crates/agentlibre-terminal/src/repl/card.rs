@@ -10,11 +10,11 @@ use super::markdown;
 use super::text::{clean, hard_wrap, width, wrap_line};
 use agentlibre_proto::ToolCall;
 use agentlibre_common::i18n::{Lang, m};
-use crate::records;
+use agentlibre_surface::records;
 use agentlibre_common::settings::Detail;
 use agentlibre_common::style::Role;
 use crate::theme::Theme;
-use crate::records::ToolResult;
+use agentlibre_surface::records::ToolResult;
 use agentlibre_common::tr;
 
 /// An event's notice as a block (AGL-099, D1): the label in the tool's

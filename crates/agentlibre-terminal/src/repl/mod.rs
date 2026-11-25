@@ -1495,7 +1495,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             Next::Functions => {
                 let list = stores
                     .entries()
-                    .map(|entries| crate::records::function_lines(&entries, lang).join("\n"));
+                    .map(|entries| agentlibre_surface::records::function_lines(&entries, lang).join("\n"));
                 match list {
                     Ok(list) => {
                         presenter.show_notice(&list, Role::Muted);

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use super::card::{self, Fold, Render, block_lines, notice_block_lines, summary, user_lines};
 use super::dock::grouped;
 use super::reading::{MIN_TOKENS_OF_A_SPEED, Reading};
-use crate::records::{self, Record, ToolResult};
+use agentlibre_surface::records::{self, Record, ToolResult};
 use super::text::StreamWrap;
 use agentlibre_client::Surface;
 use agentlibre_surface::words as texts;

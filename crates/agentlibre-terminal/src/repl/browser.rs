@@ -474,7 +474,7 @@ impl Browser {
             }
         };
         let line = truncate(
-            &format!("{mark} {:<22} {:<9}{rest}", entry.name, crate::records::source_label(entry.source, lang)),
+            &format!("{mark} {:<22} {:<9}{rest}", entry.name, agentlibre_surface::records::source_label(entry.source, lang)),
             columns,
         );
         let role = if entry.error.is_some() {

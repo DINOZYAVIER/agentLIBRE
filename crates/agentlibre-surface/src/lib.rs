@@ -9,6 +9,7 @@ pub mod clipboard;
 pub mod commands;
 mod error;
 pub mod record;
+pub mod records;
 pub mod words;
 
 pub use error::Error;

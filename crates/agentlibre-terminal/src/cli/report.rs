@@ -7,7 +7,7 @@ use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::tr;
 use agentlibre_proto::{CutOff, Event, ForgeKind, MemoryKind, Outcome, Report, ToolCall};
 
-use crate::records::ToolResult;
+use agentlibre_surface::records::ToolResult;
 
 /// How much of a command the progress line shows.
 const COMMAND_WIDTH: usize = 200;
@@ -112,14 +112,14 @@ impl StderrReport {
     }
 
     pub fn memory(&mut self, name: &str, kind: MemoryKind, text: Option<&str>) {
-        eprintln!("{}", crate::records::memory_line(name, kind, self.lang));
+        eprintln!("{}", agentlibre_surface::records::memory_line(name, kind, self.lang));
         if let Some(text) = text {
             eprintln!("{text}");
         }
     }
 
     fn forge(&mut self, name: &str, kind: ForgeKind, section: Option<&str>) {
-        eprintln!("{}", crate::records::forge_line(name, kind, section, self.lang));
+        eprintln!("{}", agentlibre_surface::records::forge_line(name, kind, section, self.lang));
     }
 
     fn compacted(&mut self) {

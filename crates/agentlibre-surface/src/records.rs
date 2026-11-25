@@ -10,7 +10,7 @@ use agentlibre_proto::{
     Outcome, PhaseTime, ToolCall, Value,
 };
 
-use agentlibre_surface::words as texts;
+use crate::words as texts;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::style::Role;
 use agentlibre_common::tr;
@@ -420,12 +420,12 @@ pub fn group(events: &[Event], transitions: &[PhaseTime], lang: Lang) -> Vec<Rec
                 thinking: pending_thinking.take(),
             }),
             Event::CutOff(cut) => records.push(notice(
-                agentlibre_surface::words::cut_off_line(cut, lang),
+                crate::words::cut_off_line(cut, lang),
                 Role::Muted,
                 None,
             )),
             Event::Stir { attempt, error } => records.push(notice(
-                agentlibre_surface::words::stir_line(*attempt, error, lang),
+                crate::words::stir_line(*attempt, error, lang),
                 Role::Muted,
                 Some(error.clone()),
             )),
@@ -715,63 +715,6 @@ mod tests {
         assert_eq!(hints, ["ls", ""]);
     }
 
-    /// The Functions of the list, as the core and as the wire have them.
-    fn entries() -> (Vec<crate::function::catalog::Entry>, Vec<FunctionEntry>) {
-        use crate::function::catalog::{Entry, Source};
-        use agentlibre_common::settings::ServerKind;
-        let make = || {
-            vec![
-                Entry {
-                    name: "minimal".into(),
-                    source: Source::BuiltIn,
-                    shadows: vec![Source::User, Source::Workspace],
-                    kind: ServerKind::Llama,
-                    model: Some("m.gguf".into()),
-                    description: Some("the smallest".into()),
-                    error: None,
-                    current: true,
-                },
-                Entry {
-                    name: "my-own-function".into(),
-                    source: Source::Plane,
-                    shadows: Vec::new(),
-                    kind: ServerKind::Llama,
-                    model: None,
-                    description: None,
-                    error: None,
-                    current: false,
-                },
-                Entry {
-                    name: "broken".into(),
-                    source: Source::Workspace,
-                    shadows: Vec::new(),
-                    kind: ServerKind::Llama,
-                    model: None,
-                    description: None,
-                    error: Some("it does not load".into()),
-                    current: false,
-                },
-            ]
-        };
-        (
-            make(),
-            make().into_iter().map(crate::plane::wire::function_entry).collect(),
-        )
-    }
-
-    #[test]
-    fn the_functions_of_the_wire_are_listed_as_the_catalog_lists_them() {
-        // AGL-130, D10: the same lines in every language.
-        let (core, wire) = entries();
-        for lang in [Lang::En, Lang::Uk] {
-            assert_eq!(
-                function_lines(&wire, lang),
-                crate::function::catalog::lines(&core, lang)
-            );
-        }
-        assert!(function_lines(&wire, Lang::En)[0].starts_with("* minimal"));
-    }
-
     #[test]
     fn the_thinking_of_a_step_goes_with_its_record() {
         // AGL-066, D19: the thinking belongs to the record of its step;
@@ -854,5 +797,24 @@ mod tests {
                 notice("the server refused to start".into(), Role::StatusFailure, None),
             ]
         );
+    }
+
+    #[test]
+    fn a_function_of_the_wire_is_a_line() {
+        let entry = |name: &str, current: bool| FunctionEntry {
+            name: name.into(),
+            source: FunctionSource::User,
+            shadows: vec![FunctionSource::BuiltIn],
+            kind: "llama".into(),
+            model: Some("m.gguf".into()),
+            description: None,
+            error: None,
+            current,
+        };
+        let lines = function_lines(&[entry("a", true), entry("long-name", false)], Lang::En);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("* a          user  llama   m.gguf"), "{}", lines[0]);
+        assert!(lines[1].starts_with("  long-name  user  llama   m.gguf"), "{}", lines[1]);
+        assert!(lines[1].contains("built-in"), "{}", lines[1]);
     }
 }
