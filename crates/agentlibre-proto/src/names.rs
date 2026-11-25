@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use crate::{MediaKind, MemoryKind, Outcome, Phase, StopReason, ToolCall, Transition, Value};
+use crate::{MediaKind, MemoryKind, Outcome, Phase, PhaseEvent, StopReason, ToolCall, Transition, Value};
 
 impl Outcome {
     /// The name in transition keys such as `bash.ok`; the wire's tag.
@@ -80,6 +80,30 @@ impl Phase {
     }
 }
 
+impl PhaseEvent {
+    /// The name in the session file.
+    pub fn name(&self) -> String {
+        match self {
+            PhaseEvent::ServerStart => "server_start".into(),
+            PhaseEvent::Transcribe => "transcribe".into(),
+            PhaseEvent::StepStart => "step_start".into(),
+            PhaseEvent::FirstThinking => "first_thinking".into(),
+            PhaseEvent::FirstText => "first_text".into(),
+            PhaseEvent::ToolStart { .. } => "tool_start".into(),
+            PhaseEvent::ToolEnd(outcome) => format!("tool_{}", outcome.name()),
+            PhaseEvent::CompactStart => "compact_start".into(),
+            PhaseEvent::Compacted => "compacted".into(),
+            PhaseEvent::CompactFailed => "compact_failed".into(),
+            PhaseEvent::CutOff => "cut_off".into(),
+            PhaseEvent::Stir { .. } => "stir".into(),
+            PhaseEvent::Answer => "answer".into(),
+            PhaseEvent::Stop(reason) => format!("stop_{}", reason.name()),
+            PhaseEvent::Failed => "failed".into(),
+            PhaseEvent::Idle => "idle".into(),
+        }
+    }
+}
+
 impl Transition {
     /// The time spent in `from`.
     pub fn time(&self) -> Duration {
@@ -108,7 +132,6 @@ impl MediaKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PhaseEvent;
 
     /// The tag serde writes for a value that is a bare string.
     fn tag<T: serde::Serialize>(value: &T) -> String {
@@ -183,6 +206,45 @@ mod tests {
                 "Retry"
             ]
         );
+    }
+
+    #[test]
+    fn a_phase_event_is_named_as_the_session_file_names_it() {
+        // A unit variant is named by its tag; the others by the tag of
+        // their variant, or by it and what it holds.
+        for event in [
+            PhaseEvent::ServerStart,
+            PhaseEvent::Transcribe,
+            PhaseEvent::StepStart,
+            PhaseEvent::FirstThinking,
+            PhaseEvent::FirstText,
+            PhaseEvent::CompactStart,
+            PhaseEvent::Compacted,
+            PhaseEvent::CompactFailed,
+            PhaseEvent::CutOff,
+            PhaseEvent::Answer,
+            PhaseEvent::Failed,
+            PhaseEvent::Idle,
+        ] {
+            assert_eq!(event.name(), tag(&event));
+        }
+        let key = |event: &PhaseEvent| {
+            serde_json::to_value(event)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone()
+        };
+        let start = PhaseEvent::ToolStart { tool: "bash".into() };
+        assert_eq!(start.name(), key(&start));
+        let stir = PhaseEvent::Stir { attempt: 1, max: 3 };
+        assert_eq!(stir.name(), key(&stir));
+        assert_eq!(PhaseEvent::ToolEnd(Outcome::Ok).name(), "tool_ok");
+        assert_eq!(PhaseEvent::ToolEnd(Outcome::Interrupted).name(), "tool_interrupted");
+        assert_eq!(PhaseEvent::Stop(StopReason::StepLimit).name(), "stop_step_limit");
     }
 
     #[test]
