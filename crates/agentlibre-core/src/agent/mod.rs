@@ -179,7 +179,7 @@ impl Agent<'_> {
                     report,
                 )?
             }
-            None => self.session.append(Event::User(message.into()))?,
+            None => self.record(Event::User(message.into()), report)?,
         }
         let unfinished = self.session.unfinished().expect("the turn has a message");
         let mut machine = Machine::resume(self.function.table(), self.function_name, &unfinished)?;

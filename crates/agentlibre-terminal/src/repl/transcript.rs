@@ -531,6 +531,11 @@ impl Sink for Presenter {
 impl Presenter {
     fn take(&mut self, report: Report) {
         match report {
+            // A message another client sent (AGL-126, D11).
+            Report::Event(Event::User(message)) => {
+                self.close();
+                self.show_user(&message);
+            }
             Report::Event(Event::State(state)) => self.state(&state),
             Report::Thinking(piece) => self.thinking(&piece),
             Report::ThinkingDone => self.thinking_done(),

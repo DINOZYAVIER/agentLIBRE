@@ -183,6 +183,11 @@ impl Conversation {
                 };
                 self.rows[at].text.push_str(piece);
             }
+            // A message another client sent (AGL-126, D11).
+            Report::Event(Event::User(text)) => {
+                self.streaming = None;
+                self.push(Who::You, text.clone());
+            }
             Report::Event(Event::Call { text, call, summary }) => {
                 // What was written before the call is its text.
                 match (self.streaming.take(), text) {
@@ -331,6 +336,18 @@ mod tests {
         assert_eq!(
             (step.output.as_deref(), step.failed),
             (Some("no such file"), true)
+        );
+    }
+
+    #[test]
+    fn a_message_of_another_client_is_the_humans() {
+        let mut conversation = Conversation::default();
+        conversation.sent(&text("Done."));
+        conversation.sent(&Sent::Report(Report::Event(Event::User("and now?".into()))));
+        conversation.sent(&text("Now"));
+        check(
+            &conversation,
+            &[(Who::Agent, "Done."), (Who::You, "and now?"), (Who::Agent, "Now")],
         );
     }
 

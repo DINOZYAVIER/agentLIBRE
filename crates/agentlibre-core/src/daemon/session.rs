@@ -241,6 +241,7 @@ impl Daemon {
         let mut next = id.to_owned();
         let mut origin = None;
         let mut turn_ended = false;
+        let sender = entry.origins.front().copied();
         entry.past.take(&item);
         let message = match item {
             Sent::Done(done) => {
@@ -270,6 +271,13 @@ impl Daemon {
             },
         };
         targets.extend(state.everyone.iter().copied());
+        // The human's message is told to all but the client it came from,
+        // which drew it (AGL-126, D11).
+        if let (Some(sender), Message::Sent(proto::Sent::Report(proto::Report::Event(proto::Event::User(_))))) =
+            (sender, &message)
+        {
+            targets.remove(&sender);
+        }
         for client in targets {
             let Some(to) = state.clients.get(&client) else { continue };
             let reply = match &message {
@@ -383,6 +391,40 @@ mod tests {
             panic!()
         };
         assert!(sessions[0].busy, "the turn runs");
+    }
+
+    #[test]
+    fn a_message_is_told_to_the_clients_that_did_not_send_it() {
+        // AGL-126, D11.
+        let dir = TempDir::new();
+        let (socket, project, mut first, id) = held_turns(&dir);
+        let (mut second, _) = Client::new(&socket, proto::VERSION);
+        let Reply::Opened(_) = second.ask(&open(&project, Some(id.clone()))) else {
+            panic!("not attached")
+        };
+        proto::send(&mut first.out, &say(&id, "hello")).unwrap();
+        // What each is told until the turn's step begins.
+        let users = |client: &mut Client| {
+            let mut users = 0;
+            loop {
+                match client.next() {
+                    Reply::Sent {
+                        sent: proto::Sent::Report(proto::Report::Event(proto::Event::User(text))),
+                        ..
+                    } => {
+                        assert_eq!(text, "hello");
+                        users += 1;
+                    }
+                    Reply::Sent {
+                        sent: proto::Sent::Report(proto::Report::Prefill),
+                        ..
+                    } => return users,
+                    reply => assert!(!matches!(reply, Reply::Done { .. }), "{reply:?}"),
+                }
+            }
+        };
+        assert_eq!(users(&mut first), 0, "its own");
+        assert_eq!(users(&mut second), 1);
     }
 
     #[test]
