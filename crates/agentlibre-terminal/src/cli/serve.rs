@@ -8,14 +8,14 @@ use std::process::ExitCode;
 use crate::backend::Backend;
 use crate::backend::llama::Llama;
 use crate::cli::args::ServerAction;
-use crate::ask::ask_terminal;
+use agentlibre_common::tty::ask_yes;
 use crate::engine::*;
 use crate::error::Error;
 use crate::engine::error::Error as EngineError;
 use crate::i18n::server as texts;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::settings::{ServerFile, ServerKind};
-use crate::outln;
+use agentlibre_common::outln;
 use agentlibre_common::tr;
 
 /// Runs a server command. `models` is the models directory.
@@ -44,7 +44,7 @@ pub fn run(
             let others = if yes {
                 Others::Yes
             } else if agentlibre_common::tty::is_interactive() {
-                Others::Ask(std::sync::Arc::new(ask_terminal))
+                Others::Ask(std::sync::Arc::new(ask_yes))
             } else {
                 Others::Refuse
             };

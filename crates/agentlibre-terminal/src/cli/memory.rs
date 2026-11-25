@@ -12,7 +12,7 @@ use agentlibre_common::i18n::Lang;
 use crate::memory;
 use agentlibre_common::paths::Paths;
 use agentlibre_common::settings::UserFile;
-use crate::outln;
+use agentlibre_common::outln;
 
 pub fn run(
     action: MemoryAction,
@@ -41,7 +41,7 @@ pub fn run(
             let _ = write!(io::stdout(), "{}", memory::show_text(dir, &name)?);
         }
         MemoryAction::Remove { name, yes } => {
-            let answer = |question: &str| crate::ask::ask_terminal(question, lang);
+            let answer = |question: &str| agentlibre_common::tty::ask_yes(question, lang);
             let ask: Option<&dyn Fn(&str) -> bool> = if agentlibre_common::tty::is_interactive() {
                 Some(&answer)
             } else {

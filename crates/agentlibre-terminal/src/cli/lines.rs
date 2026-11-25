@@ -24,7 +24,7 @@ use agentlibre_surface::words::{
     Facts, Info, Remember, display_path, help_text, parse_remember, status_text,
 };
 use agentlibre_common::tr;
-use crate::outln;
+use agentlibre_common::outln;
 
 pub fn run(setup: Setup) -> Result<ExitCode, Error> {
     let Setup {

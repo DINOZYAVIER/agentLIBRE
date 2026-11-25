@@ -15,7 +15,6 @@ pub mod init;
 pub mod lines;
 pub mod memory;
 pub mod notify;
-pub mod out;
 pub mod plane;
 pub mod report;
 pub mod search;

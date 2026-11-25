@@ -6,6 +6,7 @@ pub mod file;
 pub mod i18n;
 pub mod media;
 pub mod nix;
+pub mod out;
 pub mod paths;
 pub mod programs;
 pub mod reasoning;

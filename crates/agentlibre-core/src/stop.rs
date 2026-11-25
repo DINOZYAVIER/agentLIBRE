@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Once};
 
 /// Exit status after Ctrl-C (D112).
-pub const EXIT_CODE: u8 = 130;
+pub const EXIT_CODE: u8 = agentlibre_common::tty::INTERRUPTED_EXIT;
 
 /// The signal that wakes the thread of a turn; its handler does nothing.
 const WAKE: libc::c_int = libc::SIGUSR1;

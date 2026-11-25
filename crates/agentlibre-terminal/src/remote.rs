@@ -73,8 +73,8 @@ pub fn open(paths: &Paths, opening: Opening, lang: Lang) -> Result<(Arc<Remote>,
 /// A question asked of the human on the plain terminal.
 pub fn asked(ask: Ask, text: &str, lang: Lang) -> Option<String> {
     match ask {
-        Ask::Yes => Some(if crate::ask::ask_terminal(text, lang) { "y" } else { "n" }.into()),
-        Ask::Line => crate::ask::ask_line(text),
+        Ask::Yes => Some(if agentlibre_common::tty::ask_yes(text, lang) { "y" } else { "n" }.into()),
+        Ask::Line => agentlibre_common::tty::ask_line(text),
     }
 }
 

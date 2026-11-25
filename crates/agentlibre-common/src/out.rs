@@ -12,7 +12,7 @@ static CLOSED: AtomicBool = AtomicBool::new(false);
 #[macro_export]
 macro_rules! outln {
     ($($arg:tt)*) => {
-        $crate::cli::out::line(&format!($($arg)*))
+        $crate::out::line(&format!($($arg)*))
     };
 }
 

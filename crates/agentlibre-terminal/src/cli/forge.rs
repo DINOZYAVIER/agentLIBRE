@@ -20,7 +20,7 @@ use agentlibre_common::i18n::{Lang, Msg, m};
 use agentlibre_common::paths::Paths;
 use agentlibre_common::settings::UserFile;
 use agentlibre_common::tr;
-use crate::outln;
+use agentlibre_common::outln;
 use agentlibre_common::error::Error as CommonError;
 
 /// A `forge` command, parsed from the arguments after the word `forge`

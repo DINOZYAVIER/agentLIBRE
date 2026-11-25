@@ -16,7 +16,7 @@ use crate::error::Error;
 use crate::error::CoreError;
 use crate::engine::error::Error as EngineError;
 use agentlibre_common::i18n::{Lang, m};
-use crate::outln;
+use agentlibre_common::outln;
 use agentlibre_common::paths::Paths;
 use agentlibre_common::settings::{BridgeFile, UserFile};
 use agentlibre_common::tr;

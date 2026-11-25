@@ -1,6 +1,5 @@
 //! agentLIBRE: free and open-source agentic system.
 
-mod ask;
 mod cli;
 mod error;
 mod interrupt;
@@ -40,6 +39,7 @@ use cli::report::StderrReport;
 use error::{CoreError, Error};
 use function::Function;
 use agentlibre_common::i18n::{Lang, m};
+use agentlibre_common::outln;
 use agentlibre_common::tr;
 use paths::Paths;
 use agentlibre_client::Remote;
@@ -164,7 +164,7 @@ fn run(
             model.strata_private_ca = settings.strata_private_ca.clone();
             let missing = match action {
                 cli::args::ServerAction::Start if tty::is_interactive() => {
-                    weights::Missing::Ask(&ask::ask_line, &|line| eprintln!("{line}"))
+                    weights::Missing::Ask(&agentlibre_common::tty::ask_line, &|line| eprintln!("{line}"))
                 }
                 cli::args::ServerAction::Start => weights::Missing::Fail,
                 _ => weights::Missing::Keep,

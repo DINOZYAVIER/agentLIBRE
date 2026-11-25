@@ -16,7 +16,7 @@ use crate::error::Error;
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::paths::Paths;
 use agentlibre_common::settings::{self, SearchCa, UserFile};
-use crate::outln;
+use agentlibre_common::outln;
 use agentlibre_common::tr;
 use agentlibre_common::error::Error as CommonError;
 

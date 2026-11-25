@@ -12,7 +12,7 @@ use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::paths::Paths;
 use agentlibre_common::settings::{self, UserFile};
 use agentlibre_common::tr;
-use crate::outln;
+use agentlibre_common::outln;
 
 use super::args::FunctionAction;
 use crate::function::catalog::Catalog;
@@ -132,7 +132,7 @@ pub fn run(
                         listed: &user.models,
                         user_path: &paths.settings_file(),
                     },
-                    &crate::ask::ask_line,
+                    &agentlibre_common::tty::ask_line,
                     &|line| eprintln!("{line}"),
                     lang,
                 )?;

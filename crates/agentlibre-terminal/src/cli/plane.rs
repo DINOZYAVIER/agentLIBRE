@@ -12,14 +12,14 @@ use crate::error::Error;
 use crate::error::CoreError;
 use crate::plane::error::Error as PlaneError;
 use agentlibre_common::i18n::{Lang, m};
-use crate::outln;
+use agentlibre_common::outln;
 use agentlibre_common::paths::Paths;
 use crate::plane::{self, PlaneFile};
 use crate::session::Session;
 use agentlibre_common::tr;
 
 pub fn run(action: PlaneAction, paths: &Paths, cwd: &Path, lang: Lang) -> Result<ExitCode, Error> {
-    let ask = |question: &str| crate::ask::ask_terminal(question, lang);
+    let ask = |question: &str| agentlibre_common::tty::ask_yes(question, lang);
     let ask: Option<&dyn Fn(&str) -> bool> = agentlibre_common::tty::is_interactive().then_some(&ask);
     outln!("{}", act(action, paths, cwd, ask, lang)?);
     Ok(ExitCode::SUCCESS)
