@@ -8,8 +8,10 @@
 //! `agl notify` take it through the core, the chat takes it directly.
 
 mod conversation;
+mod surface;
 
 pub use conversation::{Conversation, Row, Step, Who};
+pub use surface::{Surface, give};
 
 use std::ffi::OsString;
 use std::fmt;
