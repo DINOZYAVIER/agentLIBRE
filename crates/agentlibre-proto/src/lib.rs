@@ -94,6 +94,39 @@ pub enum Request {
     /// A verb of a plane's flows (AGL-118, D13, D17): `agl plane flow`,
     /// run on that plane's thread, answered with what the flow's place says.
     Flow { plane: String, verb: FlowVerb },
+    /// The past sessions, the newest first, at most `limit` (AGL-126, D9):
+    /// of the project of `dir`, or of `plane`; with neither, every one's.
+    Past {
+        dir: Option<String>,
+        plane: Option<String>,
+        limit: usize,
+    },
+    /// The planes the directory `dir` is in (AGL-126, D1); with `name`, the
+    /// plane of that name alone, refused when there is none.
+    Planes { dir: String, name: Option<String> },
+    /// The Functions of a run in `dir` and `plane`, as `open` names them
+    /// (AGL-126, D1).
+    Functions { dir: String, plane: Option<String> },
+    /// A verb of one of those Functions (AGL-126, D3).
+    Function {
+        dir: String,
+        plane: Option<String>,
+        verb: FunctionVerb,
+    },
+}
+
+/// A verb of a Function, as on the command line (AGL-126, D12).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "verb", rename_all = "snake_case")]
+pub enum FunctionVerb {
+    /// Its source and the file a run loads it from.
+    Show { name: String },
+    /// Whether it loads and its model fits the settings.
+    Check { name: String },
+    /// A copy of `from` in the workspace's `functions/`.
+    New { name: String, from: String },
+    /// Its file goes; a built-in has none to delete.
+    Delete { name: String },
 }
 
 /// A verb of a flow, as on the command line (AGL-118, D2, D7). `start`
@@ -155,6 +188,10 @@ pub enum Reply {
     Text { plane: String, said: Text },
     /// A session's events, its past (AGL-073, D10).
     History { session: String, events: Vec<Event> },
+    Past { sessions: Vec<PastSession> },
+    Planes { planes: Vec<String> },
+    Functions { functions: Vec<FunctionEntry> },
+    Function(FunctionView),
     /// What a subscribed session does (D3).
     Sent { session: String, sent: Sent },
     /// The end of a command of a subscribed session; `yours` when this
@@ -224,6 +261,68 @@ pub struct SessionInfo {
     /// their windows.
     pub pids: Vec<u32>,
     pub busy: bool,
+}
+
+/// A past session (AGL-126, D9): what `agl --resume` lists of it, and where
+/// it was.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PastSession {
+    pub id: String,
+    pub time: String,
+    pub name: Option<String>,
+    /// The first line of its first message, short.
+    pub first: String,
+    pub workspace: String,
+    /// The plane its header names.
+    pub plane: Option<String>,
+}
+
+/// A Function of the list (AGL-126).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FunctionEntry {
+    pub name: String,
+    /// The source a run loads it from.
+    pub source: FunctionSource,
+    /// The sources of the same name it hides.
+    pub shadows: Vec<FunctionSource>,
+    /// The kind of its server, as the settings name it.
+    pub kind: String,
+    pub model: Option<String>,
+    pub description: Option<String>,
+    /// Why it does not load, instead of the kind and the model.
+    pub error: Option<String>,
+    /// The Function a run there loads by the settings.
+    pub current: bool,
+}
+
+/// Where a Function is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FunctionSource {
+    Plane,
+    Workspace,
+    User,
+    BuiltIn,
+}
+
+/// What a verb of a Function says (AGL-126): the file, its text of `show`,
+/// its load of `check`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FunctionView {
+    pub name: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<FunctionLoad>,
+}
+
+/// What a Function that loads runs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FunctionLoad {
+    pub kind: String,
+    pub model: Option<String>,
+    pub context: Option<u32>,
 }
 
 /// A connection's lines. `new` reads with no limit, as the clients of

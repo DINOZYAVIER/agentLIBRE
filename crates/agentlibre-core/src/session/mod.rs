@@ -415,6 +415,16 @@ impl Session {
             .collect()
     }
 
+    /// The latest sessions in `dir`, of every project (AGL-126, D9).
+    pub fn latest_of_all(dir: &Path, limit: usize) -> Vec<SessionInfo> {
+        session_files(dir)
+            .iter()
+            .rev()
+            .filter_map(|path| session_info_if(path, |_| true))
+            .take(limit)
+            .collect()
+    }
+
     /// [`Session::id_named`] among the sessions of the plane `plane`.
     pub fn id_named_of_plane(dir: &Path, plane: &str, name: &str) -> Option<String> {
         session_files(dir)
@@ -920,6 +930,10 @@ pub struct SessionInfo {
     pub first: String,
     /// Its name, when it has one (AGL-062).
     pub name: Option<String>,
+    /// Where it was (AGL-126, D9).
+    pub workspace: String,
+    /// The name of its plane, as its header has it.
+    pub plane: Option<String>,
 }
 
 impl SessionInfo {
@@ -1015,6 +1029,8 @@ fn session_info_if(path: &Path, of: impl Fn(&Json) -> bool) -> Option<SessionInf
         time: header["time"].as_str().unwrap_or_default().to_owned(),
         first: shown,
         name,
+        workspace: header["workspace"].as_str().unwrap_or_default().to_owned(),
+        plane: header["plane"]["name"].as_str().map(str::to_owned),
     })
 }
 

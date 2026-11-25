@@ -214,6 +214,20 @@ impl Daemon {
                 });
                 None
             }
+            // The stores, read apart from the sessions' threads (AGL-126): a
+            // Function's load evaluates Nix.
+            request @ (Request::Past { .. }
+            | Request::Planes { .. }
+            | Request::Functions { .. }
+            | Request::Function { .. }) => {
+                thread::spawn(move || {
+                    let reply = self
+                        .look(request, lang)
+                        .unwrap_or_else(|error| Reply::Refused { error: error.message(lang) });
+                    self.send_to(client, &reply);
+                });
+                None
+            }
             // A verb of a plane's flows, done by the plane's holder: no
             // session and no model turn a flow (AGL-118, D12, D17).
             Request::Flow { plane, verb } => {

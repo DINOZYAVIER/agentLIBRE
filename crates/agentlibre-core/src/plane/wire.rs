@@ -14,10 +14,12 @@ use crate::agent::{Report, TurnEnd};
 use crate::attach::Pending;
 use crate::backend::{Prefill, PromptProgress, ToolCall};
 use agentlibre_common::i18n::Lang;
+use crate::function::catalog::{Entry, Source as FunctionSource};
 use crate::media::{Frame, Kind, Media, Source};
 use agentlibre_forge::memory::{Kind as MemoryKind, Write};
 use crate::phase::{Phase, PhaseEvent, StepRecord, Transition};
-use crate::session::{CommandRun, CutOff, Event, ForgeKind, StopReason};
+use crate::session::{CommandRun, CutOff, Event, ForgeKind, SessionInfo, StopReason};
+use agentlibre_common::settings::ServerKind;
 
 pub fn sent(sent: Sent) -> Option<wire::Sent> {
     Some(match sent {
@@ -53,6 +55,64 @@ pub fn done(done: &Done, plane: Option<&str>, lang: Lang) -> wire::Done {
             Err(error) => Err(error.message(lang)),
         }),
         session: view(&done.session, plane),
+    }
+}
+
+/// A Function of the list (AGL-126).
+pub fn function_entry(entry: Entry) -> wire::FunctionEntry {
+    wire::FunctionEntry {
+        name: entry.name,
+        source: function_source(entry.source),
+        shadows: entry.shadows.into_iter().map(function_source).collect(),
+        kind: entry.kind.name().to_owned(),
+        model: entry.model,
+        description: entry.description,
+        error: entry.error,
+        current: entry.current,
+    }
+}
+
+/// None for a kind this agl does not know.
+pub fn function_entry_of(entry: wire::FunctionEntry) -> Option<Entry> {
+    Some(Entry {
+        kind: ServerKind::parse(&entry.kind)?,
+        name: entry.name,
+        source: function_source_of(entry.source),
+        shadows: entry.shadows.into_iter().map(function_source_of).collect(),
+        model: entry.model,
+        description: entry.description,
+        error: entry.error,
+        current: entry.current,
+    })
+}
+
+fn function_source(source: FunctionSource) -> wire::FunctionSource {
+    match source {
+        FunctionSource::Plane => wire::FunctionSource::Plane,
+        FunctionSource::Workspace => wire::FunctionSource::Workspace,
+        FunctionSource::User => wire::FunctionSource::User,
+        FunctionSource::BuiltIn => wire::FunctionSource::BuiltIn,
+    }
+}
+
+fn function_source_of(source: wire::FunctionSource) -> FunctionSource {
+    match source {
+        wire::FunctionSource::Plane => FunctionSource::Plane,
+        wire::FunctionSource::Workspace => FunctionSource::Workspace,
+        wire::FunctionSource::User => FunctionSource::User,
+        wire::FunctionSource::BuiltIn => FunctionSource::BuiltIn,
+    }
+}
+
+/// A past session (AGL-126, D9).
+pub fn past(info: SessionInfo) -> wire::PastSession {
+    wire::PastSession {
+        id: info.id,
+        time: info.time,
+        name: info.name,
+        first: info.first,
+        workspace: info.workspace,
+        plane: info.plane,
     }
 }
 

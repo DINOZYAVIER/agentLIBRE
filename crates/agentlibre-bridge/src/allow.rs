@@ -16,7 +16,9 @@ pub fn allowed(request: &Request) -> bool {
         | Request::Stop { .. }
         | Request::Answer { .. }
         | Request::Transcribe { .. }
-        | Request::Close { .. } => true,
+        | Request::Close { .. }
+        // The list of the past alone, of AGL-126's requests (its D5).
+        | Request::Past { .. } => true,
         Request::Open(open) => open.resume.is_some(),
         Request::Remember { .. }
         | Request::Remove { .. }
@@ -25,14 +27,17 @@ pub fn allowed(request: &Request) -> bool {
         | Request::New { .. }
         | Request::Compact { .. }
         | Request::Record { .. }
-        | Request::Flow { .. } => false,
+        | Request::Flow { .. }
+        | Request::Planes { .. }
+        | Request::Functions { .. }
+        | Request::Function { .. } => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agentlibre_proto::{Attached, Look, MediaKind, Open, VERSION};
+    use agentlibre_proto::{Attached, FunctionVerb, Look, MediaKind, Open, VERSION};
 
     fn audio() -> Attached {
         Attached {
@@ -75,6 +80,11 @@ mod tests {
                 audio: audio(),
             },
             Request::Close { session: s() },
+            Request::Past {
+                dir: None,
+                plane: None,
+                limit: 20,
+            },
             Request::Open(Open {
                 dir: "/w".into(),
                 resume: Some("last".into()),
@@ -119,6 +129,19 @@ mod tests {
             Request::Record {
                 session: s(),
                 lines: Vec::new(),
+            },
+            Request::Planes {
+                dir: "/w".into(),
+                name: None,
+            },
+            Request::Functions {
+                dir: "/w".into(),
+                plane: None,
+            },
+            Request::Function {
+                dir: "/w".into(),
+                plane: None,
+                verb: FunctionVerb::Delete { name: "f".into() },
             },
         ] {
             assert!(!allowed(&request), "{request:?}");

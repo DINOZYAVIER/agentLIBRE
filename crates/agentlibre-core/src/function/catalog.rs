@@ -310,6 +310,22 @@ impl Catalog {
         write_validated(&self.workspace_file(name), &self.workspace_dir, name, text)
     }
 
+    /// Deletes the file of `name` a run would load (AGL-109, D3; AGL-126,
+    /// D3), and says which it was; a built-in belongs to the repository.
+    pub fn delete(&self, name: &str) -> Result<PathBuf, Error> {
+        let file = self.file(name)?;
+        if file.source == Source::BuiltIn {
+            return Err(FunctionError::BuiltIn { name: name.into() }.into());
+        }
+        fs::remove_file(&file.path).map_err(|source| {
+            Error::from(CommonError::Write {
+                path: file.path.clone(),
+                source,
+            })
+        })?;
+        Ok(file.path)
+    }
+
     /// Saves the edited `text` over `file` (AGL-102, D4): atomic,
     /// validated through the same load as `check` before the rename; on
     /// a failure the file keeps its previous text.

@@ -99,6 +99,27 @@ fn every_request_round_trips_as_one_line() {
             plane: "work".into(),
             verb: FlowVerb::List,
         },
+        Request::Past {
+            dir: Some("/w".into()),
+            plane: None,
+            limit: 20,
+        },
+        Request::Planes {
+            dir: "/w".into(),
+            name: Some("work".into()),
+        },
+        Request::Functions {
+            dir: "/w".into(),
+            plane: None,
+        },
+        Request::Function {
+            dir: "/w".into(),
+            plane: Some("work".into()),
+            verb: FunctionVerb::New {
+                name: "mine".into(),
+                from: "stock".into(),
+            },
+        },
     ];
     for request in requests {
         let (line, back) = round(&request);
@@ -124,6 +145,37 @@ fn what_a_plane_sends_round_trips() {
         Reply::Refused { error: "no".into() },
         Reply::Ok,
         Reply::Opened(Opened::default()),
+        Reply::Past {
+            sessions: vec![PastSession {
+                id: "s".into(),
+                first: "hi".into(),
+                plane: Some("work".into()),
+                ..PastSession::default()
+            }],
+        },
+        Reply::Planes { planes: vec!["work".into()] },
+        Reply::Functions {
+            functions: vec![FunctionEntry {
+                name: "mine".into(),
+                source: FunctionSource::Workspace,
+                shadows: vec![FunctionSource::BuiltIn],
+                kind: "llama".into(),
+                model: Some("m.gguf".into()),
+                description: None,
+                error: None,
+                current: true,
+            }],
+        },
+        Reply::Function(FunctionView {
+            name: "mine".into(),
+            path: "/w/mine.nix".into(),
+            text: None,
+            load: Some(FunctionLoad {
+                kind: "llama".into(),
+                model: None,
+                context: Some(4096),
+            }),
+        }),
         Reply::History {
             session: "s".into(),
             events: vec![
