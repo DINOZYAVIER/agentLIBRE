@@ -8,9 +8,11 @@
 //! `agl notify` take it through the core, the chat takes it directly.
 
 mod conversation;
+mod remote;
 mod surface;
 
 pub use conversation::{Conversation, Row, Step, Who};
+pub use remote::{Answer, AtPrompt, Command, Remote};
 pub use surface::{Surface, give};
 
 use std::ffi::OsString;
@@ -19,7 +21,7 @@ use std::io::BufReader;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command as Process, Stdio};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
@@ -226,7 +228,7 @@ enum Program {
 fn start_daemon(socket: &Path, program: Program) -> Result<UnixStream, Error> {
     let fail = |detail: String| Error::Daemon { detail };
     if unit_installed_of(DAEMON_UNIT) {
-        let _ = Command::new("systemctl")
+        let _ = Process::new("systemctl")
             .args(["--user", "start", DAEMON_UNIT])
             .stdin(Stdio::null())
             .output();
@@ -234,9 +236,9 @@ fn start_daemon(socket: &Path, program: Program) -> Result<UnixStream, Error> {
         let mut command = match program {
             Program::ThisExe => {
                 let program = std::env::current_exe().map_err(|error| fail(error.to_string()))?;
-                Command::new(program)
+                Process::new(program)
             }
-            Program::OnPath => Command::new("agl"),
+            Program::OnPath => Process::new("agl"),
         };
         command
             .arg("daemon")
@@ -275,7 +277,7 @@ fn unit_installed(output: &str) -> bool {
 /// Whether the daemon's unit is installed for this user's manager
 /// (AGL-120, D4).
 fn unit_installed_of(unit: &str) -> bool {
-    Command::new("systemctl")
+    Process::new("systemctl")
         .args(["--user", "cat", unit])
         .stdin(Stdio::null())
         .output()
