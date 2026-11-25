@@ -183,6 +183,17 @@ fn what_a_plane_sends_round_trips() {
                 Event::Answer("hello".into()),
                 Event::System { text: "the server is ready".into(), failed: true },
             ],
+            transitions: vec![PhaseTime {
+                turn: 1,
+                step: 1,
+                from: "prefill".into(),
+                ms: 12,
+                ..PhaseTime::default()
+            }],
+            writing: Writing {
+                thinking: String::new(),
+                text: "Let me".into(),
+            },
         },
         Reply::Sent {
             session: "s".into(),
@@ -288,4 +299,18 @@ fn base64_goes_both_ways() {
     assert_eq!(base64::encode(b"fo"), "Zm8=");
     assert!(base64::decode("Zm8").is_none());
     assert!(base64::decode("Zm=8").is_none());
+}
+
+#[test]
+fn a_past_with_no_times_and_nothing_being_written_is_as_it_was() {
+    let line = r#"{"reply":"history","session":"s","events":[]}"#;
+    let history = Reply::History {
+        session: "s".into(),
+        events: Vec::new(),
+        transitions: Vec::new(),
+        writing: Writing::default(),
+    };
+    let (written, _) = round(&history);
+    assert_eq!(written.trim_end(), line);
+    assert_eq!(serde_json::from_str::<Reply>(line).unwrap(), history);
 }

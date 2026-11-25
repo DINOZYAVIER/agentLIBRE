@@ -54,8 +54,6 @@ pub enum Command {
     /// Lines of the session's record a surface writes: its commands
     /// (AGL-047, D5).
     Append(Vec<Event>),
-    /// The session's events, its past (AGL-073, D10), sent to the channel.
-    History(std::sync::mpsc::Sender<Vec<Event>>),
     /// The server comes up as the session starts (AGL-046), as a turn: its
     /// lines and its phases are sent, then the context as `Context`; a
     /// server that fails ends the command with its error in `said`.
@@ -66,6 +64,9 @@ pub enum Command {
 pub enum Sent {
     /// What the turn tells (AGL-067, D3).
     Report(Report),
+    /// An event the session took that no report tells (AGL-126, D10): for
+    /// who holds its past.
+    Kept(Event),
     /// A line of the server's start or of the transcription.
     Line(String),
     /// The server answered, with a context of this many tokens.
@@ -89,7 +90,7 @@ impl Sent {
             Sent::Context(context) => surface.context(context),
             Sent::Stored(media) => surface.stored(media),
             Sent::Over => surface.over(),
-            Sent::Done(_) => {}
+            Sent::Kept(_) | Sent::Done(_) => {}
         }
     }
 }
@@ -265,6 +266,13 @@ impl Run {
 
     fn serve(mut self, inbox: Receiver<Command>, outbox: Sender<Sent>) {
         for command in inbox {
+            // `/new` leaves a session untapped.
+            if self.session.tap.is_none() {
+                let outbox = outbox.clone();
+                self.session.tap = Some(Box::new(move |event| {
+                    let _ = outbox.send(Sent::Kept(event));
+                }));
+            }
             let done = self.take(command, &outbox);
             if outbox.send(Sent::Done(Box::new(done))).is_err() {
                 break;
@@ -330,10 +338,6 @@ impl Run {
                 for event in events {
                     let _ = self.session.append(event);
                 }
-                (None, None)
-            }
-            Command::History(to) => {
-                let _ = to.send(self.session.events.clone());
                 (None, None)
             }
             Command::Start => {
@@ -547,6 +551,45 @@ mod tests {
         assert!(matches!(done.turn, Some(Ok(TurnEnd::Answer(ref text))) if text == "Done."));
         assert!(reports > 0);
         assert!(done.session.events.iter().any(|e| matches!(e, Event::User(text) if text == "Hello")));
+    }
+
+    #[test]
+    fn what_a_run_sent_is_its_past_each_event_once() {
+        // AGL-126, D10: before a command's end gives the whole of it.
+        use crate::plane::Past;
+        let dir = TempDir::new();
+        let run = run(&dir, Arc::default());
+        let mut past = Past::of(&run.session.events);
+        let handle = run.start();
+        let command = |line: &str| {
+            Event::Command(crate::session::CommandRun {
+                line: line.into(),
+                failed: false,
+                output: None,
+            })
+        };
+        for sent in [
+            say("Hello"),
+            Command::Append(vec![command("/a"), command("/b")]),
+            Command::New,
+            Command::Append(vec![command("/c")]),
+            say("Again"),
+        ] {
+            handle.send(sent);
+            loop {
+                let sent = handle.recv().unwrap();
+                if let Sent::Done(done) = &sent {
+                    // `/new` is another session.
+                    if done.session.events.is_empty() {
+                        past.take(&sent);
+                    }
+                    assert_eq!(past.events, done.session.events);
+                    assert!(past.writing.is_empty());
+                    break;
+                }
+                past.take(&sent);
+            }
+        }
     }
 
     #[test]

@@ -39,11 +39,13 @@ use crate::wsl;
 
 pub mod error;
 pub mod flow;
+mod past;
 mod store;
 pub mod wire;
 mod thread;
 
 pub use flow::{FLOW_FILE, FlowDecl, FlowFile};
+pub use past::Past;
 pub use store::{PLANE_FILE, PlaneFile};
 
 pub use thread::{Command, Done, Handle, Parts, Sent, SessionView};

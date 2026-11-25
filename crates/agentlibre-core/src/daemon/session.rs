@@ -156,6 +156,7 @@ impl Daemon {
         };
         let voice = Arc::new(Voice::of(&run.autostart));
         let id = run.session.id.clone();
+        let past = plane::Past::of(&run.session.events);
         // The FSM of a run of one request writes to the session from now.
         let observer = open.one_request.then(|| {
             let mut observer = observer;
@@ -191,6 +192,7 @@ impl Daemon {
             subscribers: HashSet::from([client]),
             origins: VecDeque::new(),
             busy: false,
+            past,
             observer,
             voice,
             engine,
@@ -239,6 +241,7 @@ impl Daemon {
         let mut next = id.to_owned();
         let mut origin = None;
         let mut turn_ended = false;
+        entry.past.take(&item);
         let message = match item {
             Sent::Done(done) => {
                 turn_ended = true;
@@ -323,6 +326,65 @@ mod tests {
     use crate::daemon::tests::{Client, daemon, open};
     use agentlibre_common::testutil::TempDir;
 
+    /// A session open in a daemon whose turns go on until they are stopped.
+    fn held_turns(dir: &TempDir) -> (PathBuf, PathBuf, Client, String) {
+        let (paths, socket) = daemon(dir);
+        let project = dir.0.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            paths.config.join("settings.nix"),
+            format!(
+                r#"{{ agl, ... }}: {{ function = "fixture-minimal"; server.llama = {{ url = "{}"; external = true; }}; }}"#,
+                crate::daemon::tests::holding_server()
+            ),
+        )
+        .unwrap();
+        let (mut client, _) = Client::new(&socket, proto::VERSION);
+        let Reply::Opened(opened) = client.ask(&open(&project, None)) else {
+            panic!("not opened")
+        };
+        (socket, project, client, opened.session.id)
+    }
+
+    fn say(session: &str, message: &str) -> Request {
+        Request::Say {
+            session: session.into(),
+            message: message.into(),
+            attached: Vec::new(),
+            reasoning: None,
+        }
+    }
+
+    #[test]
+    fn history_is_answered_while_a_turn_runs() {
+        // AGL-126, D10.
+        let dir = TempDir::new();
+        let (socket, _, mut first, id) = held_turns(&dir);
+        proto::send(&mut first.out, &say(&id, "hello")).unwrap();
+        // The turn is in its step: its state is told.
+        loop {
+            let reply = first.next();
+            assert!(!matches!(reply, Reply::Done { .. }), "{reply:?}");
+            if let Reply::Sent {
+                sent: proto::Sent::Report(proto::Report::Prefill),
+                ..
+            } = reply
+            {
+                break;
+            }
+        }
+        let (mut second, _) = Client::new(&socket, proto::VERSION);
+        let Reply::History { session, events, .. } = second.ask(&Request::History { session: id.clone() }) else {
+            panic!("no history")
+        };
+        assert_eq!(session, id);
+        assert!(events.contains(&proto::Event::User("hello".into())), "{events:?}");
+        let Reply::Sessions { sessions } = second.ask(&Request::Sessions) else {
+            panic!()
+        };
+        assert!(sessions[0].busy, "the turn runs");
+    }
+
     #[test]
     fn history_gives_a_sessions_past() {
         // AGL-073, D10.
@@ -352,10 +414,12 @@ mod tests {
             }),
             Reply::Ok
         );
+        // The past is the session's as it is, not after what waits in it.
+        assert!(matches!(client.next(), Reply::Done { .. }));
         proto::send(&mut client.out, &Request::History { session: id.clone() }).unwrap();
         let events = loop {
             match client.next() {
-                Reply::History { session, events } => {
+                Reply::History { session, events, .. } => {
                     assert_eq!(session, id);
                     break events;
                 }

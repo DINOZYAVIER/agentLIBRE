@@ -186,8 +186,18 @@ pub enum Reply {
     /// What a flow verb answered (AGL-118, D2, D7), of the plane named (AGL-121,
     /// D39): `Text`, and its wire tag `text`.
     Text { plane: String, said: Text },
-    /// A session's events, its past (AGL-073, D10).
-    History { session: String, events: Vec<Event> },
+    /// A session's events, its past (AGL-073, D10): those of the turn that
+    /// runs too, each before what the session sends next (AGL-126, D10).
+    History {
+        session: String,
+        events: Vec<Event>,
+        /// The phases of its steps and their times.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        transitions: Vec<PhaseTime>,
+        /// What the turn that runs is writing.
+        #[serde(default, skip_serializing_if = "Writing::is_empty")]
+        writing: Writing,
+    },
     Past { sessions: Vec<PastSession> },
     Planes { planes: Vec<String> },
     Functions { functions: Vec<FunctionEntry> },
@@ -261,6 +271,36 @@ pub struct SessionInfo {
     /// their windows.
     pub pids: Vec<u32>,
     pub busy: bool,
+}
+
+/// What a turn is writing (AGL-126, D10): the pieces it sent that no event
+/// holds yet.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Writing {
+    pub thinking: String,
+    pub text: String,
+}
+
+impl Writing {
+    pub fn is_empty(&self) -> bool {
+        self.thinking.is_empty() && self.text.is_empty()
+    }
+}
+
+/// A phase of a step of the past and its time (AGL-126, D1): a `transition`
+/// line of the session's file, its names the file's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PhaseTime {
+    pub turn: usize,
+    pub step: usize,
+    pub from: String,
+    pub to: String,
+    pub event: String,
+    pub ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
 }
 
 /// A past session (AGL-126, D9): what `agl --resume` lists of it, and where

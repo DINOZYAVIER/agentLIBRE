@@ -18,7 +18,7 @@ use crate::function::catalog::{Entry, Source as FunctionSource};
 use crate::media::{Frame, Kind, Media, Source};
 use agentlibre_forge::memory::{Kind as MemoryKind, Write};
 use crate::phase::{Phase, PhaseEvent, StepRecord, Transition};
-use crate::session::{CommandRun, CutOff, Event, ForgeKind, SessionInfo, StopReason};
+use crate::session::{CommandRun, CutOff, Event, ForgeKind, SessionInfo, StopReason, TransitionLine};
 use agentlibre_common::settings::ServerKind;
 
 pub fn sent(sent: Sent) -> Option<wire::Sent> {
@@ -28,7 +28,7 @@ pub fn sent(sent: Sent) -> Option<wire::Sent> {
         Sent::Context(context) => wire::Sent::Context(context),
         Sent::Stored(media) => wire::Sent::Stored(media),
         Sent::Over => wire::Sent::Over,
-        Sent::Done(_) => return None,
+        Sent::Kept(_) | Sent::Done(_) => return None,
     })
 }
 
@@ -101,6 +101,33 @@ fn function_source_of(source: wire::FunctionSource) -> FunctionSource {
         wire::FunctionSource::Workspace => FunctionSource::Workspace,
         wire::FunctionSource::User => FunctionSource::User,
         wire::FunctionSource::BuiltIn => FunctionSource::BuiltIn,
+    }
+}
+
+/// A phase of a step of the past (AGL-126).
+pub fn phase_time(line: TransitionLine) -> wire::PhaseTime {
+    wire::PhaseTime {
+        turn: line.turn,
+        step: line.step,
+        from: line.from,
+        to: line.to,
+        event: line.event,
+        ms: line.ms,
+        tokens: line.tokens,
+        tool: line.tool,
+    }
+}
+
+pub fn phase_time_of(time: wire::PhaseTime) -> TransitionLine {
+    TransitionLine {
+        turn: time.turn,
+        step: time.step,
+        from: time.from,
+        to: time.to,
+        event: time.event,
+        ms: time.ms,
+        tokens: time.tokens,
+        tool: time.tool,
     }
 }
 

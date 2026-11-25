@@ -307,7 +307,13 @@ pub struct Session {
     /// The memory index as this run of the session read it; `None` before
     /// that (AGL-047, D2).
     memory_index: Option<Option<String>>,
+    /// Told of every event appended (AGL-126, D10), but those whose appender
+    /// tells them itself ([`Session::append_told`]).
+    pub tap: Option<Tap>,
 }
+
+/// Who is told of a session's events as they are appended.
+pub type Tap = Box<dyn Fn(Event) + Send>;
 
 impl Session {
     /// Starts a session in `dir`, created if needed (D64).
@@ -372,6 +378,7 @@ impl Session {
             file,
             prompt_inputs: BTreeMap::new(),
             memory_index: None,
+            tap: None,
         };
         let mut header = json!({
             "type": "session",
@@ -617,6 +624,7 @@ impl Session {
             file,
             prompt_inputs,
             memory_index: None,
+            tap: None,
         };
         if complete.len() < text.len() {
             // Drop the half line so that new events start on their own line.
@@ -658,6 +666,15 @@ impl Session {
 
     /// Appends `event` to the file at once and to `events`.
     pub fn append(&mut self, event: Event) -> Result<(), Error> {
+        self.append_told(event.clone())?;
+        if let Some(tap) = &self.tap {
+            tap(event);
+        }
+        Ok(())
+    }
+
+    /// [`Session::append`] of an event its appender tells of itself.
+    pub fn append_told(&mut self, event: Event) -> Result<(), Error> {
         let mut json = event_json(&event);
         json["time"] = utc_now().into();
         self.write_line(&json)?;

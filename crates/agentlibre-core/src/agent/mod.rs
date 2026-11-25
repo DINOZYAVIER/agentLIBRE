@@ -217,7 +217,7 @@ impl Agent<'_> {
 
     /// Appends `event` to the session and reports it as it was appended.
     fn record(&mut self, event: Event, report: &mut Reports<'_>) -> Result<(), Error> {
-        self.session.append(event.clone())?;
+        self.session.append_told(event.clone())?;
         report.send(Report::Event(event));
         Ok(())
     }

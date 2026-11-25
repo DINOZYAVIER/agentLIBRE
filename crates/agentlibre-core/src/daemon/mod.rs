@@ -247,6 +247,9 @@ struct Entry {
     /// Who sent each command that waits for its end, in their order (D12).
     origins: VecDeque<u64>,
     busy: bool,
+    /// The session's events as its run told them, and what its turn is
+    /// writing (AGL-126, D10).
+    past: plane::Past,
     /// The FSM that saw the server's start of a run of one request: its
     /// first message goes on from it (AGL-046, D10).
     observer: Option<Observer>,
@@ -354,6 +357,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A llama-server that is ready and answers no request of a step: a turn
+    /// on it goes on until it is stopped. Its url.
+    pub(super) fn holding_server() -> String {
+        use std::io::{BufRead, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                thread::spawn(move || {
+                    let mut lines = BufReader::new(stream.try_clone().unwrap());
+                    loop {
+                        let mut first = String::new();
+                        if lines.read_line(&mut first).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let mut line = String::new();
+                        while lines.read_line(&mut line).unwrap_or(0) > 2 {
+                            line.clear();
+                        }
+                        let body = match first.split_whitespace().nth(1).unwrap_or_default() {
+                            "/health" => r#"{"status":"ok"}"#,
+                            "/props" => r#"{"default_generation_settings":{"n_ctx":16384},"chat_template":""}"#,
+                            "/v1/models" => "{}",
+                            _ => {
+                                thread::sleep(Duration::from_secs(3600));
+                                return;
+                            }
+                        };
+                        let reply = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if stream.write_all(reply.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        url
     }
 
     pub(super) fn open(dir: &Path, resume: Option<String>) -> Request {

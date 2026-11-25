@@ -195,22 +195,28 @@ impl Daemon {
                 self.release(client, Some(&session));
                 Some(Reply::Ok)
             }
-            // The plane's thread answers when its command comes, after the
-            // one it runs (AGL-073, D10).
+            // Answered while a command runs (AGL-126, D10), at one point of
+            // what the session sends: under the lock `tell` sends under.
             Request::History { session } => {
-                let (to, from) = mpsc::channel();
-                if let Err(error) = self.command(client, &session, |_| Command::History(to), false, false) {
-                    return refused(error);
-                }
                 thread::spawn(move || {
-                    let events = from.recv().unwrap_or_default();
-                    self.send_to(
-                        client,
-                        &Reply::History {
+                    let transitions = Session::open(&self.paths.sessions(), &session)
+                        .map(|session| session.transitions)
+                        .unwrap_or_default();
+                    let state = self.lock();
+                    let reply = match state.sessions.get(&session) {
+                        Some(entry) => Reply::History {
+                            events: entry.past.events.iter().cloned().map(wire::event).collect(),
+                            transitions: transitions.into_iter().map(wire::phase_time).collect(),
+                            writing: entry.past.writing.clone(),
                             session,
-                            events: events.into_iter().map(wire::event).collect(),
                         },
-                    );
+                        None => Reply::Refused {
+                            error: Error::from(super::error::Error::NoSession { id: session }).message(lang),
+                        },
+                    };
+                    if let Some(client) = state.clients.get(&client) {
+                        write(&client.out, &reply);
+                    }
                 });
                 None
             }
