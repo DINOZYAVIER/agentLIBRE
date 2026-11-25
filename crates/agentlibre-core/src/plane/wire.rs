@@ -3,23 +3,19 @@
 //! the core, and the protocol's back to the core's for a surface that
 //! draws them with the core.
 
-use std::path::PathBuf;
-use std::time::Duration;
-
 use agentlibre_proto as wire;
 
 use super::{Done, Text, Sent, SessionView, Told};
 use crate::action::{Outcome, Value};
 use crate::agent::{Report, TurnEnd};
 use crate::attach::Pending;
-use crate::backend::{Prefill, PromptProgress, ToolCall};
+use crate::backend::ToolCall;
 use agentlibre_common::i18n::Lang;
 use crate::function::catalog::{Entry, Source as FunctionSource};
-use crate::media::{Frame, Kind, Media, Source};
-use agentlibre_forge::memory::{Kind as MemoryKind, Write};
-use crate::phase::{Phase, PhaseEvent, StepRecord, Transition};
-use crate::session::{CommandRun, CutOff, Event, ForgeKind, SessionInfo, StopReason, TransitionLine};
-use agentlibre_common::settings::ServerKind;
+use crate::media::{Kind, Source};
+use agentlibre_forge::memory::Kind as MemoryKind;
+use crate::phase::{Phase, PhaseEvent};
+use crate::session::{CommandRun, Event, ForgeKind, SessionInfo, StopReason, TransitionLine};
 
 pub fn sent(sent: Sent) -> Option<wire::Sent> {
     Some(match sent {
@@ -30,16 +26,6 @@ pub fn sent(sent: Sent) -> Option<wire::Sent> {
         Sent::Over => wire::Sent::Over,
         Sent::Kept(_) | Sent::Done(_) => return None,
     })
-}
-
-pub fn sent_of(sent: wire::Sent) -> Sent {
-    match sent {
-        wire::Sent::Report(report) => Sent::Report(report_of(report)),
-        wire::Sent::Line(line) => Sent::Line(line),
-        wire::Sent::Context(context) => Sent::Context(context),
-        wire::Sent::Stored(media) => Sent::Stored(media),
-        wire::Sent::Over => Sent::Over,
-    }
 }
 
 /// A command's end; its errors in `lang`.
@@ -72,35 +58,12 @@ pub fn function_entry(entry: Entry) -> wire::FunctionEntry {
     }
 }
 
-/// None for a kind this agl does not know.
-pub fn function_entry_of(entry: wire::FunctionEntry) -> Option<Entry> {
-    Some(Entry {
-        kind: ServerKind::parse(&entry.kind)?,
-        name: entry.name,
-        source: function_source_of(entry.source),
-        shadows: entry.shadows.into_iter().map(function_source_of).collect(),
-        model: entry.model,
-        description: entry.description,
-        error: entry.error,
-        current: entry.current,
-    })
-}
-
 fn function_source(source: FunctionSource) -> wire::FunctionSource {
     match source {
         FunctionSource::Plane => wire::FunctionSource::Plane,
         FunctionSource::Workspace => wire::FunctionSource::Workspace,
         FunctionSource::User => wire::FunctionSource::User,
         FunctionSource::BuiltIn => wire::FunctionSource::BuiltIn,
-    }
-}
-
-fn function_source_of(source: wire::FunctionSource) -> FunctionSource {
-    match source {
-        wire::FunctionSource::Plane => FunctionSource::Plane,
-        wire::FunctionSource::Workspace => FunctionSource::Workspace,
-        wire::FunctionSource::User => FunctionSource::User,
-        wire::FunctionSource::BuiltIn => FunctionSource::BuiltIn,
     }
 }
 
@@ -115,19 +78,6 @@ pub fn phase_time(line: TransitionLine) -> wire::PhaseTime {
         ms: line.ms,
         tokens: line.tokens,
         tool: line.tool,
-    }
-}
-
-pub fn phase_time_of(time: wire::PhaseTime) -> TransitionLine {
-    TransitionLine {
-        turn: time.turn,
-        step: time.step,
-        from: time.from,
-        to: time.to,
-        event: time.event,
-        ms: time.ms,
-        tokens: time.tokens,
-        tool: time.tool,
     }
 }
 
@@ -154,28 +104,10 @@ pub fn view(view: &SessionView, plane: Option<&str>) -> wire::SessionView {
     }
 }
 
-pub fn view_of(view: wire::SessionView) -> SessionView {
-    SessionView {
-        id: view.id,
-        name: view.name,
-        events: Vec::new(),
-        outputs: PathBuf::from(view.outputs),
-        unfinished: view.unfinished,
-        media: view.media,
-    }
-}
-
 pub fn turn_end(end: TurnEnd) -> wire::TurnEnd {
     match end {
         TurnEnd::Answer(text) => wire::TurnEnd::Answer(text),
         TurnEnd::Stopped(reason) => wire::TurnEnd::Stopped(stop_reason(reason)),
-    }
-}
-
-pub fn turn_end_of(end: wire::TurnEnd) -> TurnEnd {
-    match end {
-        wire::TurnEnd::Answer(text) => TurnEnd::Answer(text),
-        wire::TurnEnd::Stopped(reason) => TurnEnd::Stopped(stop_reason_of(reason)),
     }
 }
 
@@ -201,25 +133,6 @@ pub fn said(said: &Text, lang: Lang) -> wire::Text {
         failed: said.failed,
         interrupted: said.interrupted,
         record_error: said.record_error.as_ref().map(|error| error.message(lang)),
-    }
-}
-
-/// The told lines of `said` back; its record's error stays text.
-pub fn told_of(told: wire::Told) -> Told {
-    match told {
-        wire::Told::Output(text) => Told::Output(text),
-        wire::Told::Notice(text) => Told::Notice(text),
-        wire::Told::Refusal(text) => Told::Refusal(text),
-        wire::Told::Fault(text) => Told::Fault(text),
-        wire::Told::Pending(text) => Told::Pending(text),
-    }
-}
-
-pub fn write_of(write: wire::MemoryWrite) -> Write {
-    Write {
-        name: write.name,
-        kind: memory_kind_of(write.kind),
-        text: write.text,
     }
 }
 
@@ -268,51 +181,6 @@ pub fn report(report: Report) -> wire::Report {
     }
 }
 
-pub fn report_of(report: wire::Report) -> Report {
-    match report {
-        wire::Report::Event(event) => Report::Event(event_of(event)),
-        wire::Report::Prefill => Report::Prefill,
-        wire::Report::Thinking(text) => Report::Thinking(text),
-        wire::Report::ThinkingDone => Report::ThinkingDone,
-        wire::Report::ActionStarted => Report::ActionStarted,
-        wire::Report::ActionText(text) => Report::ActionText(text),
-        wire::Report::Stirred { attempt, max, error } => Report::Stirred { attempt, max, error },
-        wire::Report::Compacting => Report::Compacting,
-        wire::Report::Compacted => Report::Compacted,
-        wire::Report::CompactFailed => Report::CompactFailed,
-        wire::Report::ContextUsed(n) => Report::ContextUsed(n),
-        wire::Report::Decoded(n) => Report::Decoded(n),
-        wire::Report::PromptProgress(p) => Report::PromptProgress(PromptProgress {
-            total: p.total,
-            cache: p.cache,
-            processed: p.processed,
-            time_ms: p.time_ms,
-        }),
-        wire::Report::PromptRead(p) => Report::PromptRead(Prefill {
-            tokens: p.tokens,
-            ms: p.ms,
-        }),
-        wire::Report::StepStarted(s) => Report::StepStarted(StepRecord {
-            state: s.state,
-            prompt_sha256: s.prompt_sha256,
-            prompt_tokens: s.prompt_tokens,
-            think: s.think,
-            think_budget: s.think_budget,
-            action_budget: s.action_budget,
-            context: s.context,
-            stirred: s.stirred,
-            reasoning: s.reasoning,
-        }),
-        wire::Report::Transition(t) => Report::Transition(Transition {
-            from: phase_of(t.from),
-            to: phase_of(t.to),
-            event: phase_event_of(t.event),
-            time: Duration::from_micros(t.micros),
-            violation: t.violation,
-        }),
-    }
-}
-
 pub fn event(event: Event) -> wire::Event {
     match event {
         Event::User(text) => wire::Event::User(text),
@@ -326,14 +194,7 @@ pub fn event(event: Event) -> wire::Event {
             wire::Event::Call {
                 text,
                 summary: Some(summary),
-                call: wire::ToolCall {
-                    id: call.id,
-                    name: call.name,
-                    args: call.args
-                        .into_iter()
-                        .map(|(name, value)| (name, self::value(value)))
-                        .collect(),
-                },
+                call: tool_call(call),
             }
         }
         Event::Result { id, outcome, content } => wire::Event::Result {
@@ -379,66 +240,6 @@ pub fn event(event: Event) -> wire::Event {
         Event::Compact { summary, question } => wire::Event::Compact { summary, question },
         Event::Command(run) => wire::Event::Command(command(run)),
         Event::System { text, failed } => wire::Event::System { text, failed },
-    }
-}
-
-pub fn event_of(event: wire::Event) -> Event {
-    match event {
-        wire::Event::User(text) => Event::User(text),
-        wire::Event::Wake { flow, text } => Event::Wake { flow, text },
-        wire::Event::State(name) => Event::State(name),
-        wire::Event::Thinking(text) => Event::Thinking(text),
-        wire::Event::Call { text, call, .. } => Event::Call {
-            text,
-            call: ToolCall {
-                id: call.id,
-                name: call.name,
-                args: call.args.into_iter().map(|(name, value)| (name, value_of(value))).collect(),
-            },
-        },
-        wire::Event::Result { id, outcome, content } => Event::Result {
-            id,
-            outcome: outcome_of(outcome),
-            content,
-        },
-        wire::Event::Forge { name, kind, section } => Event::Forge {
-            name,
-            kind: forge_kind_of(kind),
-            section,
-        },
-        wire::Event::Answer(text) => Event::Answer(text),
-        wire::Event::CutOff(cut) => Event::CutOff(CutOff {
-            limit: cut.limit,
-            thinking: cut.thinking,
-            discarded: cut.discarded,
-            call: cut.call,
-        }),
-        wire::Event::Stir { attempt, error } => Event::Stir { attempt, error },
-        wire::Event::Stop(reason) => Event::Stop(stop_reason_of(reason)),
-        wire::Event::Memory { name, kind, text } => Event::Memory {
-            name,
-            kind: memory_kind_of(kind),
-            text,
-        },
-        wire::Event::Media(media) => Event::Media(Media {
-            kind: media_kind_of(media.kind),
-            number: media.number,
-            sha256: media.sha256,
-            ext: media.ext,
-            name: media.name,
-            transcript: media.transcript,
-            frames: media
-                .frames
-                .into_iter()
-                .map(|frame| Frame {
-                    at: frame.at,
-                    sha256: frame.sha256,
-                })
-                .collect(),
-        }),
-        wire::Event::Compact { summary, question } => Event::Compact { summary, question },
-        wire::Event::Command(line) => Event::Command(command_of(line)),
-        wire::Event::System { text, failed } => Event::System { text, failed },
     }
 }
 
@@ -495,27 +296,10 @@ pub fn tool_call(call: ToolCall) -> wire::ToolCall {
     }
 }
 
-/// A cut-off on the wire.
-pub fn cut_off(cut: &CutOff) -> wire::CutOff {
-    wire::CutOff {
-        limit: cut.limit,
-        thinking: cut.thinking,
-        discarded: cut.discarded,
-        call: cut.call,
-    }
-}
-
 fn value(value: Value) -> wire::Value {
     match value {
         Value::Text(text) => wire::Value::Text(text),
         Value::Int(n) => wire::Value::Int(n),
-    }
-}
-
-fn value_of(value: wire::Value) -> Value {
-    match value {
-        wire::Value::Text(text) => Value::Text(text),
-        wire::Value::Int(n) => Value::Int(n),
     }
 }
 
@@ -525,15 +309,6 @@ pub fn outcome(outcome: Outcome) -> wire::Outcome {
         Outcome::Fail => wire::Outcome::Fail,
         Outcome::Timeout => wire::Outcome::Timeout,
         Outcome::Interrupted => wire::Outcome::Interrupted,
-    }
-}
-
-fn outcome_of(outcome: wire::Outcome) -> Outcome {
-    match outcome {
-        wire::Outcome::Ok => Outcome::Ok,
-        wire::Outcome::Fail => Outcome::Fail,
-        wire::Outcome::Timeout => Outcome::Timeout,
-        wire::Outcome::Interrupted => Outcome::Interrupted,
     }
 }
 
@@ -547,17 +322,7 @@ pub fn stop_reason(reason: StopReason) -> wire::StopReason {
     }
 }
 
-pub fn stop_reason_of(reason: wire::StopReason) -> StopReason {
-    match reason {
-        wire::StopReason::StepLimit => StopReason::StepLimit,
-        wire::StopReason::ContextFull => StopReason::ContextFull,
-        wire::StopReason::ServerError => StopReason::ServerError,
-        wire::StopReason::Interrupted => StopReason::Interrupted,
-        wire::StopReason::StirLimit => StopReason::StirLimit,
-    }
-}
-
-pub fn forge_kind(kind: ForgeKind) -> wire::ForgeKind {
+fn forge_kind(kind: ForgeKind) -> wire::ForgeKind {
     match kind {
         ForgeKind::Created => wire::ForgeKind::Created,
         ForgeKind::Edited => wire::ForgeKind::Edited,
@@ -568,30 +333,11 @@ pub fn forge_kind(kind: ForgeKind) -> wire::ForgeKind {
     }
 }
 
-fn forge_kind_of(kind: wire::ForgeKind) -> ForgeKind {
-    match kind {
-        wire::ForgeKind::Created => ForgeKind::Created,
-        wire::ForgeKind::Edited => ForgeKind::Edited,
-        wire::ForgeKind::Appended => ForgeKind::Appended,
-        wire::ForgeKind::Removed => ForgeKind::Removed,
-        wire::ForgeKind::StatusChanged => ForgeKind::StatusChanged,
-        wire::ForgeKind::Renamed => ForgeKind::Renamed,
-    }
-}
-
-pub fn memory_kind(kind: MemoryKind) -> wire::MemoryKind {
+fn memory_kind(kind: MemoryKind) -> wire::MemoryKind {
     match kind {
         MemoryKind::Added => wire::MemoryKind::Added,
         MemoryKind::Edited => wire::MemoryKind::Edited,
         MemoryKind::Removed => wire::MemoryKind::Removed,
-    }
-}
-
-fn memory_kind_of(kind: wire::MemoryKind) -> MemoryKind {
-    match kind {
-        wire::MemoryKind::Added => MemoryKind::Added,
-        wire::MemoryKind::Edited => MemoryKind::Edited,
-        wire::MemoryKind::Removed => MemoryKind::Removed,
     }
 }
 
@@ -625,20 +371,6 @@ fn phase(phase: Phase) -> wire::Phase {
     }
 }
 
-fn phase_of(phase: wire::Phase) -> Phase {
-    match phase {
-        wire::Phase::Ready => Phase::Ready,
-        wire::Phase::StartingServer => Phase::StartingServer,
-        wire::Phase::Transcribing => Phase::Transcribing,
-        wire::Phase::Prefill => Phase::Prefill,
-        wire::Phase::Thinking => Phase::Thinking,
-        wire::Phase::Writing => Phase::Writing,
-        wire::Phase::Running(tool) => Phase::Running(tool),
-        wire::Phase::Compacting => Phase::Compacting,
-        wire::Phase::Retry { attempt, max } => Phase::Retry { attempt, max },
-    }
-}
-
 fn phase_event(event: PhaseEvent) -> wire::PhaseEvent {
     match event {
         PhaseEvent::ServerStart => wire::PhaseEvent::ServerStart,
@@ -660,69 +392,129 @@ fn phase_event(event: PhaseEvent) -> wire::PhaseEvent {
     }
 }
 
-fn phase_event_of(event: wire::PhaseEvent) -> PhaseEvent {
-    match event {
-        wire::PhaseEvent::ServerStart => PhaseEvent::ServerStart,
-        wire::PhaseEvent::Transcribe => PhaseEvent::Transcribe,
-        wire::PhaseEvent::StepStart => PhaseEvent::StepStart,
-        wire::PhaseEvent::FirstThinking => PhaseEvent::FirstThinking,
-        wire::PhaseEvent::FirstText => PhaseEvent::FirstText,
-        wire::PhaseEvent::ToolStart { tool } => PhaseEvent::ToolStart { tool },
-        wire::PhaseEvent::ToolEnd(outcome) => PhaseEvent::ToolEnd(outcome_of(outcome)),
-        wire::PhaseEvent::CompactStart => PhaseEvent::CompactStart,
-        wire::PhaseEvent::Compacted => PhaseEvent::Compacted,
-        wire::PhaseEvent::CompactFailed => PhaseEvent::CompactFailed,
-        wire::PhaseEvent::CutOff => PhaseEvent::CutOff,
-        wire::PhaseEvent::Stir { attempt, max } => PhaseEvent::Stir { attempt, max },
-        wire::PhaseEvent::Answer => PhaseEvent::Answer,
-        wire::PhaseEvent::Stop(reason) => PhaseEvent::Stop(stop_reason_of(reason)),
-        wire::PhaseEvent::Failed => PhaseEvent::Failed,
-        wire::PhaseEvent::Idle => PhaseEvent::Idle,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_report_goes_to_the_wire_and_back_as_it_was() {
+    fn a_report_goes_to_the_wire_as_it_was() {
+        // The mapping back is gone (AGL-130, D11): what the run reports is
+        // what the wire says, value for value.
+        let bash = ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            args: vec![("command".into(), Value::Text("ls".into())), ("timeout".into(), Value::Int(9))],
+        };
         let reports = [
-            Report::Event(Event::Call {
-                text: Some("look".into()),
-                call: ToolCall {
+            (
+                Report::Event(Event::Call {
+                    text: Some("look".into()),
+                    call: bash,
+                }),
+                wire::Report::Event(wire::Event::Call {
+                    text: Some("look".into()),
+                    call: wire::ToolCall {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        args: vec![
+                            ("command".into(), wire::Value::Text("ls".into())),
+                            ("timeout".into(), wire::Value::Int(9)),
+                        ],
+                    },
+                    summary: Some("ls".into()),
+                }),
+            ),
+            (
+                Report::Event(Event::Result {
                     id: "c1".into(),
-                    name: "bash".into(),
-                    args: vec![("command".into(), Value::Text("ls".into())), ("timeout".into(), Value::Int(9))],
+                    outcome: Outcome::Timeout,
+                    content: "…".into(),
+                }),
+                wire::Report::Event(wire::Event::Result {
+                    id: "c1".into(),
+                    outcome: wire::Outcome::Timeout,
+                    content: "…".into(),
+                }),
+            ),
+            (
+                Report::Event(Event::Stop(StopReason::StirLimit)),
+                wire::Report::Event(wire::Event::Stop(wire::StopReason::StirLimit)),
+            ),
+            (
+                Report::Event(Event::Command(CommandRun {
+                    line: "/status".into(),
+                    failed: false,
+                    output: None,
+                })),
+                wire::Report::Event(wire::Event::Command(wire::CommandLine {
+                    line: "/status".into(),
+                    failed: false,
+                    output: None,
+                })),
+            ),
+            (
+                Report::Stirred {
+                    attempt: 1,
+                    max: 3,
+                    error: "bad".into(),
                 },
-            }),
-            Report::Event(Event::Result {
-                id: "c1".into(),
-                outcome: Outcome::Timeout,
-                content: "…".into(),
-            }),
-            Report::Event(Event::Stop(StopReason::StirLimit)),
-            Report::Event(Event::Command(CommandRun {
-                line: "/status".into(),
-                failed: false,
-                output: None,
-            })),
-            Report::Stirred {
-                attempt: 1,
-                max: 3,
-                error: "bad".into(),
-            },
-            Report::Transition(Transition {
-                from: Phase::Running("bash".into()),
-                to: Phase::Retry { attempt: 2, max: 3 },
-                event: PhaseEvent::ToolEnd(Outcome::Fail),
-                time: Duration::from_micros(1234),
-                violation: true,
-            }),
-            Report::PromptRead(Prefill { tokens: 10, ms: 2.5 }),
+                wire::Report::Stirred {
+                    attempt: 1,
+                    max: 3,
+                    error: "bad".into(),
+                },
+            ),
+            (
+                Report::Transition(crate::phase::Transition {
+                    from: Phase::Running("bash".into()),
+                    to: Phase::Retry { attempt: 2, max: 3 },
+                    event: PhaseEvent::ToolEnd(Outcome::Fail),
+                    time: std::time::Duration::from_micros(1234),
+                    violation: true,
+                }),
+                wire::Report::Transition(wire::Transition {
+                    from: wire::Phase::Running("bash".into()),
+                    to: wire::Phase::Retry { attempt: 2, max: 3 },
+                    event: wire::PhaseEvent::ToolEnd(wire::Outcome::Fail),
+                    micros: 1234,
+                    violation: true,
+                }),
+            ),
+            (
+                Report::PromptRead(crate::backend::Prefill { tokens: 10, ms: 2.5 }),
+                wire::Report::PromptRead(wire::Prefill { tokens: 10, ms: 2.5 }),
+            ),
         ];
-        for report in reports {
-            assert_eq!(report_of(self::report(report.clone())), report);
+        for (report, on_the_wire) in reports {
+            assert_eq!(self::report(report), on_the_wire);
+        }
+    }
+
+    #[test]
+    fn a_phase_event_has_the_same_name_on_the_wire() {
+        // `PhaseEvent::name` is the core's and the protocol's (AGL-130, D3).
+        let events = [
+            PhaseEvent::ServerStart,
+            PhaseEvent::Transcribe,
+            PhaseEvent::StepStart,
+            PhaseEvent::FirstThinking,
+            PhaseEvent::FirstText,
+            PhaseEvent::ToolStart { tool: "bash".into() },
+            PhaseEvent::ToolEnd(Outcome::Ok),
+            PhaseEvent::ToolEnd(Outcome::Interrupted),
+            PhaseEvent::CompactStart,
+            PhaseEvent::Compacted,
+            PhaseEvent::CompactFailed,
+            PhaseEvent::CutOff,
+            PhaseEvent::Stir { attempt: 1, max: 2 },
+            PhaseEvent::Answer,
+            PhaseEvent::Stop(StopReason::StepLimit),
+            PhaseEvent::Stop(StopReason::StirLimit),
+            PhaseEvent::Failed,
+            PhaseEvent::Idle,
+        ];
+        for event in events {
+            assert_eq!(phase_event(event.clone()).name(), event.name());
         }
     }
 

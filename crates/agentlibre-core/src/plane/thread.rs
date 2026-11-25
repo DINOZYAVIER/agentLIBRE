@@ -80,21 +80,6 @@ pub enum Sent {
     Done(Box<Done>),
 }
 
-impl Sent {
-    /// Gives what the run sent to the surface of the turn; a command's end
-    /// is not for it.
-    pub fn give(self, surface: &mut dyn Turn) {
-        match self {
-            Sent::Report(report) => surface.send(report),
-            Sent::Line(line) => surface.line(&line),
-            Sent::Context(context) => surface.context(context),
-            Sent::Stored(media) => surface.stored(media),
-            Sent::Over => surface.over(),
-            Sent::Kept(_) | Sent::Done(_) => {}
-        }
-    }
-}
-
 /// The end of a command.
 pub struct Done {
     /// A message's turn.
