@@ -57,8 +57,8 @@ pub enum Error {
     Terminal { source: io::Error },
 }
 
-/// A surface crate's error as the core's, for what still speaks the core's
-/// until the dictation is the surface's (AGL-127, D6).
+/// A surface crate's error as the core's, which the terminal's error wraps
+/// (AGL-127, D6) and its sessions still speak.
 pub(crate) fn core_of(error: agentlibre_surface::Error) -> CoreError {
     match error {
         agentlibre_surface::Error::Client(error) => error.into(),
