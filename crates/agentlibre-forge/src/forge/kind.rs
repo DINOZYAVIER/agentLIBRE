@@ -818,6 +818,19 @@ mod tests {
     }
 
     #[test]
+    fn a_store_s_descriptions_do_not_reach_another_store() {
+        // AGL-124, D20: a project's descriptions are not a plane's.
+        let dir = TempDir::new();
+        let project = dir.path().join("project");
+        let plane = dir.path().join("planes/work");
+        fs::create_dir_all(project.join(DIR)).unwrap();
+        fs::create_dir_all(&plane).unwrap();
+        fs::write(project.join(DIR).join("trial.nix"), MINIMAL).unwrap();
+        assert_eq!(Kinds::of(&project).get("trial").unwrap().statuses, ["a", "b"]);
+        assert_eq!(Kinds::of(&plane).get("trial").unwrap().statuses, ["open", "running", "concluded", "dropped"]);
+    }
+
+    #[test]
     fn the_first_description_found_wins_and_a_broken_one_stays_its_own() {
         // AGL-124, D11, D18, D20: the store, then the config, then agl's.
         let dir = TempDir::new();
