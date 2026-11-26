@@ -410,9 +410,19 @@ mod tests {
         (socket, project, client, opened.session.id)
     }
 
-    /// What `open` answers in a daemon whose settings are `settings`, with
-    /// the weights `models` in its folder of them.
-    fn opened_with(dir: &TempDir, settings: &str, models: &[&str]) -> (Client, PathBuf, proto::Opened) {
+    /// The `settings.nix` for a project session: the Function, the daemon's
+    /// `settings`, and an external llama server that holds its turns.
+    fn settings_file(settings: &str) -> String {
+        format!(
+            r#"{{ agl, ... }}: {{ function = "fixture-minimal"; {settings} server.llama = {{ url = "{}"; external = true; }}; }}"#,
+            crate::tests::holding_server()
+        )
+    }
+
+    /// A daemon on `dir` with `project` registered (so a whisper unit key
+    /// names it) and the weights `models` in its folder of them; its
+    /// `settings.nix` is `settings`. Its paths, socket and project.
+    fn daemon_with(dir: &TempDir, settings: &str, models: &[&str]) -> (Paths, PathBuf, PathBuf) {
         let (paths, socket) = daemon(dir);
         let project = dir.0.join("project");
         std::fs::create_dir_all(&project).unwrap();
@@ -431,14 +441,14 @@ mod tests {
         for model in models {
             std::fs::write(paths.models().join(model), b"weights").unwrap();
         }
-        std::fs::write(
-            paths.config.join("settings.nix"),
-            format!(
-                r#"{{ agl, ... }}: {{ function = "fixture-minimal"; {settings} server.llama = {{ url = "{}"; external = true; }}; }}"#,
-                crate::tests::holding_server()
-            ),
-        )
-        .unwrap();
+        std::fs::write(paths.config.join("settings.nix"), settings_file(settings)).unwrap();
+        (paths, socket, project)
+    }
+
+    /// What `open` answers in a daemon whose settings are `settings`, with
+    /// the weights `models` in its folder of them.
+    fn opened_with(dir: &TempDir, settings: &str, models: &[&str]) -> (Client, PathBuf, proto::Opened) {
+        let (_, socket, project) = daemon_with(dir, settings, models);
         let (mut client, _) = Client::new(&socket, proto::VERSION);
         let Reply::Opened(opened) = client.ask(&open(&project, None)) else {
             panic!("not opened")
@@ -494,6 +504,105 @@ mod tests {
             panic!("a draft was taken")
         };
         assert_eq!(error, "no draft server is set for this session's whisper");
+    }
+
+    #[test]
+    fn a_transcribe_without_its_session_open_is_refused_by_name() {
+        // AGL-136, D1: the request names a session; no other session's
+        // whisper stands in for one that is not loaded.
+        let dir = TempDir::new();
+        let (mut client, _project, _opened) = opened_with(&dir, "", &[]);
+        let Reply::Refused { error } = client.ask(&chunk("no-such-session", false)) else {
+            panic!("a ghost session transcribed")
+        };
+        assert_eq!(
+            error,
+            "no session no-such-session is open in the daemon, to transcribe with its settings"
+        );
+    }
+
+    /// A whisper server that answers every `/inference` with `text`: its url.
+    fn whisper_server(text: String) -> String {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let text = text.clone();
+                thread::spawn(move || {
+                    let mut lines = BufReader::new(stream.try_clone().unwrap());
+                    loop {
+                        let mut first = String::new();
+                        if lines.read_line(&mut first).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let mut length = 0usize;
+                        loop {
+                            let mut line = String::new();
+                            if lines.read_line(&mut line).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                                length = rest.trim().parse().unwrap_or(0);
+                            }
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                        let mut body = vec![0u8; length];
+                        if length > 0 && lines.read_exact(&mut body).is_err() {
+                            return;
+                        }
+                        let body = format!(r#"{{"text":"{text}"}}"#);
+                        let reply = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        if stream.write_all(reply.as_bytes()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn each_session_of_a_workspace_dictates_with_its_own_whisper() {
+        // AGL-136, D1: two sessions open on one workspace under different
+        // `whisper` settings; each one's audio goes to its own transcriber
+        // and draft server, not to the other's.
+        let dir = TempDir::new();
+        let whisper = |name: &str| {
+            format!(
+                "whisper = {{ url = \"{}\"; model = \"w.bin\"; draft_url = \"{}\"; draft_model = \"draft.bin\"; }};",
+                whisper_server(name.into()),
+                whisper_server(format!("{name} draft")),
+            )
+        };
+        let (paths, socket, project) = daemon_with(&dir, &whisper("first"), &["draft.bin", "w.bin"]);
+        let (mut client, _) = Client::new(&socket, proto::VERSION);
+        let Reply::Opened(one) = client.answer(&open(&project, None)) else {
+            panic!("not opened")
+        };
+        // The settings change while the first session stays loaded (AGL-127).
+        std::fs::write(paths.config.join("settings.nix"), settings_file(&whisper("second"))).unwrap();
+        let Reply::Opened(two) = client.answer(&open(&project, None)) else {
+            panic!("not opened")
+        };
+        assert_ne!(one.session.id, two.session.id);
+        for (id, name) in [(&one.session.id, "first"), (&two.session.id, "second")] {
+            let Reply::Transcribed { text } = client.ask(&chunk(id, false)) else {
+                panic!("no transcription for {id}")
+            };
+            assert_eq!(text, name, "the whisper of the session's own");
+            let Reply::Transcribed { text } = client.ask(&chunk(id, true)) else {
+                panic!("no draft for {id}")
+            };
+            assert_eq!(text, format!("{name} draft"), "the draft server of the session's own");
+        }
     }
 
     fn say(session: &str, message: &str) -> Request {
