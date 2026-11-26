@@ -248,6 +248,9 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
     // `/function new`: the name and the Function it copies, until the
     // daemon answers.
     let making = signal(None::<(String, String)>);
+    // The blocks the human opened or closed by hand (AGL-139, D5): a
+    // session's own, forgotten with its past.
+    let clicks = signal(HashMap::<(usize, char), bool>::new());
 
     // The user's settings, as the REPL reads them: the thinking, the longest
     // recording, the colors (D4, D8). A file that does not load is said, and
@@ -353,7 +356,10 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                 }
                 Reply::History {
                     events, transitions, ..
-                } => chat.update(|chat| chat.history(&events, &transitions)),
+                } => {
+                    clicks.set(HashMap::new());
+                    chat.update(|chat| chat.history(&events, &transitions));
+                }
                 Reply::Sent { session: of, sent } if ours(&of) => {
                     if let Sent::Report(Report::Transition(transition)) = &sent {
                         busy.set(transition.to != Phase::Ready);
@@ -370,6 +376,7 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                     if !done.session.id.is_empty() && !ours(&done.session.id) {
                         session.set(Some(done.session.id.clone()));
                         info.update(|info| info.session = done.session.id.clone());
+                        clicks.set(HashMap::new());
                         chat.update(Chat::fresh);
                     }
                     if done.turn.is_some() {
@@ -476,6 +483,7 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                     confirm,
                     switching,
                     making,
+                    clicks,
                     drafts,
                     quit: quit.clone(),
                     repl,
@@ -577,6 +585,8 @@ struct State {
     switching: Signal<Option<slash::Switch>>,
     /// A `/function new` being made.
     making: Signal<Option<(String, String)>>,
+    /// The blocks the human opened or closed by hand (AGL-139, D5).
+    clicks: Signal<HashMap<(usize, char), bool>>,
     /// Whether the daemon drafts a dictation.
     drafts: Signal<bool>,
     quit: katarsa_app::Quit,
@@ -639,6 +649,7 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
         confirm,
         switching,
         making,
+        clicks,
         drafts,
         quit,
         repl,
@@ -926,7 +937,6 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
     // what the human opens by hand goes against it, and a new level forgets
     // those clicks.
     let level = signal(repl.thinking);
-    let clicks = signal(HashMap::<(usize, char), bool>::new());
     // The phase's time counts on while the phase lasts (AGL-139, D1), as
     // the REPL's dock ticks: a second of the clock redraws the row, when a
     // phase runs.
