@@ -151,10 +151,17 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
     let busy = signal(false);
     let question = signal(None::<(u64, String)>);
     let prompt = signal(String::new());
+    let past = signal(Vec::<proto::PastSession>::new());
+    let sidebar = signal(true);
+    let place = Place {
+        dir: dir.to_string_lossy().into_owned(),
+        plane: args.plane.clone(),
+    };
 
     let mut app = App::new("agl-chat")?;
     {
         let out = Arc::clone(&out);
+        let place = place.clone();
         let on_reply = move |reply: Reply| {
             let ours = |of: &str| session.with(|session| session.as_deref() == Some(of));
             match reply {
@@ -162,7 +169,9 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                     let id = opened.session.id;
                     session.set(Some(id.clone()));
                     send(&out, &Request::History { session: id });
+                    send(&out, &place.past());
                 }
+                Reply::Past { sessions } => past.set(sessions),
                 Reply::History {
                     events, transitions, ..
                 } => chat.update(|chat| chat.history(&events, &transitions)),
@@ -175,6 +184,8 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                 Reply::Done {
                     session: of, done, ..
                 } if ours(&of) => {
+                    // A session's first message or a rename shows in the list.
+                    send(&out, &place.past());
                     if done.turn.is_some() {
                         busy.set(false);
                     }
@@ -255,9 +266,70 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
             size: [900, 720],
             min_size: Some([420, 320]),
         },
-        move |_| build(&out, chat, session, busy, question, prompt),
+        move |_| {
+            build(
+                &out,
+                State {
+                    chat,
+                    session,
+                    busy,
+                    question,
+                    prompt,
+                    past,
+                    sidebar,
+                    place: place.clone(),
+                },
+            )
+        },
     );
     Ok(app.run()?.clean)
+}
+
+/// Where the chat opens its sessions: the directory, and the plane of
+/// `--plane` (AGL-128, D6).
+#[derive(Clone)]
+struct Place {
+    dir: String,
+    plane: Option<String>,
+}
+
+/// How many past sessions the list shows, as `agl --resume` lists them.
+const PAST: usize = 20;
+
+impl Place {
+    /// The request of the sessions of the directory's project, or of its
+    /// plane (AGL-126, D9; AGL-128, D6).
+    fn past(&self) -> Request {
+        match &self.plane {
+            Some(plane) => Request::Past { dir: None, plane: Some(plane.clone()), limit: PAST },
+            None => Request::Past { dir: Some(self.dir.clone()), plane: None, limit: PAST },
+        }
+    }
+
+    /// The request that opens the session `resume`, or a new one.
+    fn open(&self, resume: Option<String>) -> Request {
+        Request::Open(proto::Open {
+            dir: self.dir.clone(),
+            plane: self.plane.clone(),
+            resume,
+            ..proto::Open::default()
+        })
+    }
+}
+
+/// The signals of the window.
+#[derive(Clone)]
+struct State {
+    chat: Signal<Chat>,
+    session: Signal<Option<String>>,
+    busy: Signal<bool>,
+    question: Signal<Option<(u64, String)>>,
+    prompt: Signal<String>,
+    /// The sessions at the left (D1, D6).
+    past: Signal<Vec<proto::PastSession>>,
+    /// Whether the list of sessions shows (D1).
+    sidebar: Signal<bool>,
+    place: Place,
 }
 
 /// The chat, as a signal.
@@ -273,17 +345,37 @@ fn record_at<T>(chat: Signal<Chat>, at: usize, read: impl Fn(&Record) -> T) -> O
 }
 
 /// The window's UI.
-fn build(
-    out: &Arc<Client>,
-    chat: Signal<Chat>,
-    session: Signal<Option<String>>,
-    busy: Signal<bool>,
-    question: Signal<Option<(u64, String)>>,
-    prompt: Signal<String>,
-) -> Ui {
+fn build(out: &Arc<Client>, state: State) -> Ui {
+    let State {
+        chat,
+        session,
+        busy,
+        question,
+        prompt,
+        past,
+        sidebar,
+        place,
+    } = state;
     let ui = Ui::new("chat");
     ui.styles(styles()).expect("the chat's styles work out");
-    ui.set_root_style(Sty::column().gap(10.0).pad(14.0));
+    ui.set_root_style(Sty::row().gap(14.0).pad(14.0));
+    // Another session of the list: this one closed, that one opened; its
+    // past comes with its `opened`.
+    let switch = {
+        let out = Arc::clone(out);
+        let place = place.clone();
+        move |resume: Option<String>| {
+            if busy.get() {
+                return;
+            }
+            if let Some(id) = session.get() {
+                send(&out, &Request::Close { session: id });
+            }
+            session.set(None);
+            chat.update(|chat| chat.history(&[], &[]));
+            send(&out, &place.open(resume));
+        }
+    };
     let stop = {
         let out = Arc::clone(out);
         move || {
@@ -336,6 +428,43 @@ fn build(
     // What the copy buttons copy through (KS-041 D3).
     let copier = ui.clone();
     ui.mount(move |cx| {
+        // The sessions of the directory's project or plane, at the left (D1,
+        // D6): a click opens one.
+        let switch = switch.clone();
+        cx.show(Sty::column().width(240.0).gap(4.0), move || sidebar.get(), move |cx| {
+            let switch = switch.clone();
+            let new = switch.clone();
+            cx.button("new-session", "+ new", move || new(None));
+            let rows = move || past.with(|past| past.iter().map(|session| session.id.clone()).collect::<Vec<_>>());
+            let switch = switch.clone();
+            cx.keyed(Sty::column().gap(2.0), rows, |id| id.clone(), move |cx, id| {
+                let id = id.clone();
+                let label = {
+                    let id = id.clone();
+                    prop(move || {
+                        past.with(|past| {
+                            past.iter()
+                                .find(|session| session.id == id)
+                                .map(|session| session.name.clone().unwrap_or_else(|| session.first.clone()))
+                                .unwrap_or_default()
+                        })
+                    })
+                };
+                let current = {
+                    let id = id.clone();
+                    prop(move || session.with(|session| session.as_deref() == Some(id.as_str())))
+                };
+                let switch = switch.clone();
+                let key: &'static str = Box::leak(format!("session-{id}").into_boxed_str());
+                cx.item(key, label, current, move || switch(Some(id.clone())));
+            });
+        });
+        cx.group(Sty::column().gap(10.0).grow(1.0), move |cx| {
+        cx.group(Sty::row(), move |cx| {
+            // The font has no menu glyph: a word.
+            let button = cx.button("sessions", "sessions", move || sidebar.set(!sidebar.get()));
+            cx.class(button, "fold");
+        });
         let area = cx.scroll_at_end(Sty::column().gap(8.0).grow(1.0), |_| {});
         let items = move || chat.with(|chat| (0..chat.records().len()).collect::<Vec<_>>());
         let copier = copier.clone();
@@ -395,6 +524,7 @@ fn build(
             move |text| prompt.set(text),
             submit,
         );
+        });
     });
     ui
 }
