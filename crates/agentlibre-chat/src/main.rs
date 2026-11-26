@@ -47,8 +47,10 @@ The daemon is started when none runs.
 Keys of the field: Enter sends, Shift+Enter breaks a line; / opens the menu
 of the commands, the arrows pick one, Enter takes it; Up at the first line
 recalls the messages sent; Ctrl-R records the microphone and sends the text,
-Alt-R puts it in the line; Ctrl-V attaches a picture or files; Ctrl-O shows
-the session in full; Escape leaves that view, or stops the turn.
+Alt-R puts it in the line; Ctrl-V attaches a picture or files; Escape stops
+the turn. The row under the field says the Function, the context used and
+its size, the phase and its time, and the speed; its button goes round the
+levels of detail: off, flexible, full.
 
   --resume [<id|name|last>]  go on with a session; with no id, list them
   --plane <name>             the session in that plane
@@ -67,8 +69,9 @@ agl; сесії теки зліва. Демон запускається, кол
 Клавіші поля: Enter надсилає, Shift+Enter переносить рядок; / відкриває меню
 команд, стрілки вибирають, Enter бере; Up на першому рядку повертає надіслані
 повідомлення; Ctrl-R записує мікрофон і надсилає текст, Alt-R ставить його в
-рядок; Ctrl-V прикріплює картинку чи файли; Ctrl-O показує сесію повністю;
-Escape виходить із цього вигляду або зупиняє хід.
+рядок; Ctrl-V прикріплює картинку чи файли; Escape зупиняє хід. Рядок під
+полем каже Function, використаний контекст і його розмір, фазу з її часом та
+швидкість; його кнопка ходить рівнями деталей: off, flexible, full.
 
   --resume [<id|назва|last>]  продовжити сесію; без id — список
   --plane <назва>             сесія в цьому плані
@@ -969,27 +972,16 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
             // The font has no menu glyph: a word.
             let button = cx.button("sessions", "sessions", move || sidebar.set(!sidebar.get()));
             cx.class(button, "fold");
-            // The REPL's Ctrl-O (D2): the session's records in full.
-            let button = cx.button("inspect", "inspect", move || inspect.set(!inspect.get()));
-            cx.class(button, "fold");
         });
         let items = move || chat.with(|chat| (0..chat.records().len()).collect::<Vec<_>>());
-        let copier = copier.clone();
-        let detail = repl.thinking;
-        cx.show(Sty::column().grow(1.0), move || !inspect.get(), move |cx| {
-            let area = cx.scroll_at_end(Sty::column().gap(8.0).grow(1.0), |_| {});
-            let copier = copier.clone();
-            cx.keyed_in(area, items, |at| *at, move |cx, &at| record(cx, chat, at, &copier, detail, lang));
-        });
-        cx.show(Sty::column().grow(1.0), move || inspect.get(), move |cx| {
-            let area = cx.scroll_at_end(Sty::column().gap(10.0).grow(1.0), |_| {});
-            cx.keyed_in(area, items, |at| *at, move |cx, &at| inspected(cx, chat, at));
-        });
+        let draw = Draw { chat, copier: copier.clone(), level, clicks, lang };
+        let area = cx.scroll_at_end(Sty::column().gap(8.0).grow(1.0), |_| {});
+        cx.keyed_in(area, items, |at| *at, move |cx, &at| record(cx, at, draw.clone()));
         // What the step is writing now: its thinking, its text.
         cx.show(
             Sty::column().gap(6.0),
-            // `off` shows none of it (D4).
-            move || repl.thinking != Detail::Off && chat.with(|chat| chat.thinking.is_some()),
+            // `off` shows none of it (D5).
+            move || level.get() != Detail::Off && chat.with(|chat| chat.thinking.is_some()),
             move |cx| {
                 let text = prop(move || chat.with(|chat| chat.thinking.clone().unwrap_or_default()));
                 cx.paragraph(text, Tone::Dim);
@@ -1113,11 +1105,6 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
         let take = pick.clone();
         let press = press.clone();
         cx.on_field_key(field, move |key| {
-            // Ctrl-O: the inspect view (D2).
-            if let KeyInput::Shortcut { letter: 'o', ctrl: true, alt: false, .. } = key.input {
-                inspect.set(!inspect.get());
-                return true;
-            }
             // Ctrl-R and Alt-R dictate (D2).
             if let KeyInput::Shortcut { letter: 'r', ctrl, alt, .. } = key.input
                 && (ctrl || alt)
