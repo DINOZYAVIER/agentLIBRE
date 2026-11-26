@@ -161,6 +161,8 @@ thread_local! {
     static ON_VOICE: RefCell<Option<OnVoice>> = const { RefCell::new(None) };
     /// What a tick of a dictation's draft does, on the loop's thread.
     static ON_TICK: RefCell<Option<OnTick>> = const { RefCell::new(None) };
+    /// What a second of the row's clock does, on the loop's thread.
+    static ON_SECOND: RefCell<Option<OnTick>> = const { RefCell::new(None) };
 }
 
 /// Sends `request` to the daemon; a daemon gone is told by the reader.
@@ -925,6 +927,35 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
     // those clicks.
     let level = signal(repl.thinking);
     let clicks = signal(HashMap::<(usize, char), bool>::new());
+    // The phase's time counts on while the phase lasts (AGL-139, D1), as
+    // the REPL's dock ticks: a second of the clock redraws the row, when a
+    // phase runs.
+    let clock = signal(0u64);
+    ON_SECOND.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            if chat.with(|chat| chat.dock().phase != Phase::Ready) {
+                clock.update(|second| *second += 1);
+            }
+        }));
+    });
+    {
+        let handle = handle.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                let posted = handle.post(|| {
+                    ON_SECOND.with(|slot| {
+                        if let Some(second) = slot.borrow_mut().as_mut() {
+                            second();
+                        }
+                    });
+                });
+                if !posted {
+                    return;
+                }
+            }
+        });
+    }
     // What the copy buttons copy through (KS-041 D3).
     let copier = ui.clone();
     ui.mount(move |cx| {
@@ -1073,6 +1104,7 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
             cx.class(node, "chat.usage");
             let node = cx.label(
                 prop(move || {
+                    clock.get();
                     chat.with(|chat| {
                         let dock = chat.dock();
                         let label = dock.phase_label(lang);
