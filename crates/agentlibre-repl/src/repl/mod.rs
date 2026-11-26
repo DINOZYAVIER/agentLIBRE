@@ -312,11 +312,9 @@ struct Text {
     failed: bool,
 }
 
-/// The open buffer of `/function edit` (AGL-102, D4): the file it edits,
-/// the lines as they are now, and the lines as saved — unequal says
-/// there are changes the file never got.
 /// What the inspect mode shows when the daemon cannot be asked (AGL-066,
-/// D4): the session's id, and what the last command left of it.
+/// D4): the session's id, its outputs, and the last past that was read of
+/// it (AGL-133, D1).
 struct InspectData {
     id: String,
     events: Vec<Event>,
@@ -1250,7 +1248,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     term::block_sigint();
     let done = Arc::new(AtomicBool::new(false));
     // What the inspect mode shows when the daemon cannot be asked (AGL-066,
-    // D4): the session as the last command left it.
+    // D4): the last past that was read of the session (AGL-133, D1).
     let inspect_data = Arc::new(Mutex::new(InspectData {
         id: opened.session.id.clone(),
         events: events.clone(),
@@ -1272,10 +1270,20 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 )
             };
             let follower = agentlibre_surface::daemon::Follower::of(&paths, lang, &id).ok();
-            let (events, transitions) = follower
-                .as_ref()
-                .and_then(|follower| follower.past().ok())
-                .unwrap_or(kept);
+            // What the daemon answered is the fallback from now on (AGL-133,
+            // D1).
+            let read = follower.as_ref().and_then(|follower| follower.past().ok());
+            let (events, transitions) = match read {
+                Some(past) => {
+                    let mut inner = data.lock().unwrap();
+                    if inner.id == id {
+                        inner.events = past.0.clone();
+                        inner.transitions = past.1.clone();
+                    }
+                    past
+                }
+                None => kept,
+            };
             // The mode follows the session while the agent works (AGL-113,
             // D1): an empty read asks whether it grew.
             let poll = || follower.as_ref().and_then(agentlibre_surface::daemon::Follower::grown);
@@ -1460,15 +1468,15 @@ pub fn run(setup: Setup) -> Result<End, Error> {
             gone = true;
             break;
         }
-        // What the inspect mode falls back on, and the new id of a `/new`
-        // (AGL-066).
+        // The outputs the inspect mode falls back on (AGL-066); the empty
+        // ones of a command that was refused do not replace them (AGL-133,
+        // D3).
         {
             let mut inner = inspect_data.lock().unwrap();
-            inner.id = session.borrow().id.clone();
-            // The wire's view of a session holds no events: the fallback has
-            // none after a command, as it had none before (AGL-130).
-            inner.events = Vec::new();
-            inner.outputs = PathBuf::from(&session.borrow().outputs);
+            let outputs = &session.borrow().outputs;
+            if !outputs.is_empty() {
+                inner.outputs = PathBuf::from(outputs);
+            }
         }
         // The command's line in the session's record (AGL-047, D5).
         let record = |line: String, failed: bool, output: Option<String>| {
@@ -1560,6 +1568,18 @@ pub fn run(setup: Setup) -> Result<End, Error> {
                 match ask(Command::New, &mut drop).and_then(|done| done.said) {
                     Some(Ok(said)) => {
                         show_said(&presenter, &said);
+                        // Ctrl-O shows the new session at once, with nothing
+                        // read of it yet (AGL-133, D1, D2).
+                        {
+                            let mut inspect = inspect_data.lock().unwrap();
+                            inspect.id = session.borrow().id.clone();
+                            inspect.events = Vec::new();
+                            inspect.transitions = Vec::new();
+                            let outputs = &session.borrow().outputs;
+                            if !outputs.is_empty() {
+                                inspect.outputs = PathBuf::from(outputs);
+                            }
+                        }
                         let mut inner = control.lock();
                         inner.info = Info {
                             session: session.borrow().id.clone(),
