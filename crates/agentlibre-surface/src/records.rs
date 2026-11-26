@@ -296,8 +296,9 @@ pub fn call_action(call: &ToolCall) -> Option<String> {
 }
 
 /// The label of a phase as the observer names it in the file, in
-/// `lang`; `None` for a phase the frame does not name.
-fn phase_label(name: &str, tool: &str, lang: Lang) -> Option<String> {
+/// `lang`; `None` for a phase the frame does not name (AGL-139, D1: a
+/// client that shows the phase of the turn reads it here too).
+pub fn phase_label(name: &str, tool: &str, lang: Lang) -> Option<String> {
     Some(match name {
         "Prefill" => tr!(lang, m::PREFILL).to_string(),
         "Thinking" => tr!(lang, m::THINKING_ACTIVITY).to_string(),
