@@ -1656,3 +1656,44 @@ fn the_flow_tool_moves_a_flow_and_reads_its_journal() {
         assert!(out.content.starts_with(text), "{}", out.content);
     }
 }
+
+#[test]
+fn the_forge_tool_knows_the_kinds_of_its_store() {
+    // AGL-124, Verification: the description names both kinds with their
+    // statuses and fields; `new` with `type=trial` makes a trial; `append`
+    // to the `Log` of a concluded trial is refused (D14).
+    let f = ForgeStore::new();
+    let text = super::forge_description(
+        &ForgeEnv { lang: Lang::En, auto_rehome: true, data: f._data.0.as_path(), plane: Some(&f.ws) },
+        &f._repo.0,
+    );
+    assert!(text.starts_with(super::spec::FORGE), "{text}");
+    for part in [
+        "Kind task-spec: statuses open (to in-progress, backlog, canceled), in-progress (to done, backlog, canceled), done, backlog (to in-progress), canceled, starting open",
+        "task-spec (range): The git range of the work",
+        "append-only: Progress.",
+        "Kind trial: statuses open (to running, dropped), running (to concluded, dropped), concluded, dropped, starting open",
+        "subject (string): What is tried",
+        "edit while open, running; append while open, running; remove while open, dropped; append-only: Log.",
+    ] {
+        assert!(text.contains(part), "{part}\n{text}");
+    }
+    let (result, write) = f.call_write("new", &[("type", "trial"), ("title", "Inkling")]);
+    assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
+    let name = write.unwrap().name;
+    assert_eq!(name, "trial-001-inkling");
+    assert_eq!(f.call("append", &[("name", &name), ("section", "Log"), ("text", "brought up")]).outcome, Outcome::Ok);
+    for state in ["running", "concluded"] {
+        assert_eq!(f.call("status", &[("name", &name), ("state", state)]).outcome, Outcome::Ok);
+    }
+    assert_eq!(
+        f.call("append", &[("name", &name), ("section", "Log"), ("text", "more")]).content,
+        "trial-001-inkling is concluded; append is allowed while open or running"
+    );
+    // A kind with no description is refused by name.
+    assert_eq!(
+        f.call("new", &[("type", "doc"), ("title", "x")]).content,
+        "no description of the kind doc is found: forge-types/doc.nix is in none of the store, \
+         the user's config or agl's"
+    );
+}

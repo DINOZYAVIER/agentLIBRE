@@ -390,6 +390,58 @@ pub fn forge_run(
     }
 }
 
+/// The `forge` tool's description for a session (AGL-124, D17): the
+/// actions, then each kind found for the session's store — the plane's
+/// in a plane, else the workspace's — with its statuses and their edges,
+/// its fields and what each is, and the statuses each action is allowed
+/// in. It only looks for the store: it never adopts or renames one.
+pub fn forge_description(env: &ForgeEnv<'_>, workspace: &Path) -> String {
+    use agentlibre_forge::forge::{self, Kinds};
+    let kinds = match env.plane {
+        Some(plane) => Kinds::of(&plane.dir),
+        None => match forge::locate(env.data, workspace) {
+            Ok(ws) => Kinds::of(&ws.dir),
+            Err(_) => Kinds::shared(),
+        },
+    };
+    let mut text = String::from(spec::FORGE);
+    for kind in kinds.all() {
+        let statuses: Vec<String> = kind
+            .statuses
+            .iter()
+            .map(|status| match kind.edges.get(status).filter(|to| !to.is_empty()) {
+                Some(to) => format!("{status} (to {})", to.join(", ")),
+                None => status.clone(),
+            })
+            .collect();
+        let fields: Vec<String> = kind
+            .fields
+            .iter()
+            .map(|(name, field)| format!("{name} ({}): {}", field.kind.name(), field.description))
+            .collect();
+        let while_ = |action: &str| match kind.allowed(action) {
+            [] => "never".to_owned(),
+            statuses => statuses.join(", "),
+        };
+        text.push_str(&format!(
+            " Kind {}: statuses {}, starting {}; fields: {}; edit while {}; append while {}; remove while {}",
+            kind.name,
+            statuses.join(", "),
+            kind.initial,
+            if fields.is_empty() { "none".to_owned() } else { fields.join("; ") },
+            while_("edit"),
+            while_("append"),
+            while_("remove"),
+        ));
+        let append_only: Vec<&str> = kind.append_only().collect();
+        if !append_only.is_empty() {
+            text.push_str(&format!("; append-only: {}", append_only.join(", ")));
+        }
+        text.push('.');
+    }
+    text
+}
+
 /// The `forge` tool's clean failure with the message `content`.
 fn forge_fail(content: String) -> ToolResult {
     ToolResult {

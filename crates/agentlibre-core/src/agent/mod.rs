@@ -110,6 +110,9 @@ pub struct Agent<'a> {
     pub context: usize,
     /// What the `forge` tool takes from the session (AGL-008).
     pub forge: ForgeEnv<'a>,
+    /// What the model is told of the `forge` tool: its actions and the
+    /// kinds found for the session's store (AGL-124, D17).
+    pub forge_description: String,
     /// The model's reasoning level (AGL-013); `None` is the template's
     /// default. `Off` silences the thinking states.
     pub reasoning: Option<ReasoningLevel>,
@@ -262,7 +265,8 @@ impl Agent<'_> {
         {
             return Err(BackendError::NoMultimodal.into());
         }
-        let tools = function_tools(function);
+        let owned = function_tools(function, &self.forge_description);
+        let tools: Vec<&Spec> = owned.iter().collect();
         // `Off` silences the thinking states (AGL-013, Q4): the level and
         // the state decide the thinking together.
         let think = state.think && self.reasoning != Some(ReasoningLevel::Off);
@@ -499,7 +503,7 @@ impl Agent<'_> {
         report: &mut Reports<'_>,
         state: &crate::function::State,
         messages: &[Message],
-        tools: &[&'static Spec],
+        tools: &[&Spec],
         prompt: &str,
         prompt_tokens: usize,
         think: bool,
@@ -581,7 +585,8 @@ impl Agent<'_> {
             &self.session.media_dir(),
             self.backend,
         )?;
-        let tools = function_tools(function);
+        let owned = function_tools(function, &self.forge_description);
+        let tools: Vec<&Spec> = owned.iter().collect();
         let prompt = Prompt {
             messages: &messages,
             instruction: None,
@@ -604,7 +609,8 @@ impl Agent<'_> {
         budget: u32,
     ) -> Result<Option<crate::backend::Generated>, Error> {
         let function = self.function;
-        let tools = function_tools(function);
+        let owned = function_tools(function, &self.forge_description);
+        let tools: Vec<&Spec> = owned.iter().collect();
         let (messages, expanded, prompt) = loop {
             let mut messages = base.clone();
             let expanded = media::expand(
@@ -914,7 +920,7 @@ fn system_prompt(function: &Function, context: usize) -> String {
 
 /// Every tool of any state, for the stable tool list of the prompt (D14,
 /// D113).
-fn function_tools(function: &Function) -> Vec<&'static Spec> {
+fn function_tools(function: &Function, forge: &str) -> Vec<Spec> {
     tools::SPECS
         .iter()
         .filter(|doc| {
@@ -922,6 +928,13 @@ fn function_tools(function: &Function) -> Vec<&'static Spec> {
                 .states
                 .iter()
                 .any(|state| state.actions.tools.iter().any(|t| t.name == doc.name))
+        })
+        .map(|doc| {
+            let mut doc = doc.clone();
+            if doc.name == "forge" {
+                doc.description = std::borrow::Cow::Owned(forge.to_owned());
+            }
+            doc
         })
         .collect()
 }

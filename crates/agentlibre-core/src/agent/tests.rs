@@ -416,6 +416,7 @@ fn agent_searching<'a>(
             data: &dir.0,
             plane: None,
         },
+        forge_description: crate::tools::spec::FORGE.to_owned(),
         reasoning,
         image_tokens: 1000,
         whisper: &NoWhisper,
@@ -568,7 +569,7 @@ fn a_failed_search_is_a_result_the_model_reads_not_a_stop() {
 fn without_search_the_tool_is_not_in_the_list_nor_the_grammar() {
     let mut minimal = Function::load(&[Path::new("/none"), Path::new("/none")], "fixture-minimal").unwrap();
     let names = |function: &Function| -> Vec<&'static str> {
-        function_tools(function).iter().map(|doc| doc.name).collect()
+        function_tools(function, "").iter().map(|doc| doc.name).collect()
     };
     assert!(names(&minimal).contains(&"search"));
     minimal.without_tool("search");
@@ -1199,9 +1200,9 @@ fn only_function_tools_are_listed() {
     let answer_only =
         function(r#"{ system = "s"; initial = "a"; state.a.answer = true; }"#)
             .unwrap();
-    assert!(function_tools(&answer_only).is_empty());
+    assert!(function_tools(&answer_only, "").is_empty());
     let coder = function(CODER).unwrap();
-    let names: Vec<&str> = function_tools(&coder).iter().map(|d| d.name).collect();
+    let names: Vec<&str> = function_tools(&coder, "").iter().map(|d| d.name).collect();
     // The implicit forge (AGL-011) is a tool of the tool states.
     assert_eq!(names, ["bash", "edit", "forge"]);
 }

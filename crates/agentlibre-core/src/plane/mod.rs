@@ -569,6 +569,7 @@ impl Run {
     /// The agent of a turn on this run, for a server with a context of
     /// `context` tokens: the one place an [`Agent`] is built.
     pub fn agent(&mut self, context: usize) -> Agent<'_> {
+        let forge_description = crate::tools::forge_description(&self.forge(), &self.workspace);
         Agent {
             function: &self.function,
             function_name: &self.function_name,
@@ -582,6 +583,7 @@ impl Run {
                 data: &self.data,
                 plane: self.plane_forge.as_ref(),
             },
+            forge_description,
             reasoning: self.reasoning,
             image_tokens: self.image_tokens,
             whisper: &self.autostart as &dyn Transcriber,

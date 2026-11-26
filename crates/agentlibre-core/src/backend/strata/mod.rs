@@ -541,7 +541,7 @@ fn render_tool_doc(out: &mut String, doc: &Spec) {
     out.push_str("- ");
     out.push_str(doc.name);
     out.push_str(": ");
-    out.push_str(doc.description);
+    out.push_str(&doc.description);
     out.push('\n');
     for param in doc.params {
         out.push_str("  - ");
@@ -570,7 +570,7 @@ mod tests {
     /// The doc of the `bash` tool, as the flat prompt shows it (AGL-030, D2).
     const BASH: Spec = Spec {
         name: "bash",
-        description: "Run a shell command.",
+        description: std::borrow::Cow::Borrowed("Run a shell command."),
         params: &[
             ParamSpec::text("command", true, None),
             ParamSpec::of(
