@@ -28,6 +28,10 @@ pub enum Slash {
     List(Request),
     /// `/function <name>`, `/plane <name>`: checked, then a new session.
     Switch(Switch),
+    /// `/function show <name>` (its source and file) and `/function new
+    /// <name> [from]` (a copy, `from` the session's Function when not
+    /// given) (AGL-102, D2, D3): the daemon's answer is said.
+    Function { request: Request, made: Option<(String, String)> },
     /// `/new`: a new session.
     New,
     /// `/quit`, `/exit`: the window closes.
@@ -49,7 +53,8 @@ pub struct Here<'a> {
     pub plane: Option<&'a str>,
     pub busy: bool,
     pub reasoning: Option<ReasoningLevel>,
-    /// What `/status` says (D134).
+    /// What `/status` says (D134); its Function is the one `/function new`
+    /// copies by default.
     pub facts: Option<&'a words::Facts>,
     pub info: &'a words::Info,
 }
@@ -142,13 +147,38 @@ pub fn slash(line: &str, here: &Here) -> Slash {
             session: here.session.to_owned(),
             reasoning: here.reasoning.map(|level| level.name().to_owned()),
         }),
-        "/function" => match rest.split_whitespace().next() {
-            None => Slash::List(Request::Functions {
+        "/function" => {
+            let mut words = rest.split_whitespace();
+            let verb = |verb| Request::Function {
                 dir: here.dir.to_owned(),
                 plane: here.plane.map(str::to_owned),
-            }),
-            Some(function) => Slash::Switch(Switch::Function(function.to_owned())),
-        },
+                verb,
+            };
+            match (words.next(), words.next(), words.next()) {
+                (None, ..) => Slash::List(Request::Functions {
+                    dir: here.dir.to_owned(),
+                    plane: here.plane.map(str::to_owned),
+                }),
+                // `edit`: the chat has no editor of its own; its source and
+                // file, as `show`.
+                (Some("show" | "edit"), None, _) => say(tr!(lang, m::FUNCTION_SHOW_USAGE).to_string(), true),
+                (Some("show" | "edit"), Some(name), _) => Slash::Function {
+                    request: verb(proto::FunctionVerb::Show { name: name.to_owned() }),
+                    made: None,
+                },
+                (Some("new"), None, _) => say(tr!(lang, m::FUNCTION_NEW_USAGE).to_string(), true),
+                (Some("new"), Some(name), from) => {
+                    let Some(from) = from.map(str::to_owned).or_else(|| here.facts.map(|facts| facts.function.clone())) else {
+                        return say(tr!(lang, m::FUNCTION_NEW_USAGE).to_string(), true);
+                    };
+                    Slash::Function {
+                        request: verb(proto::FunctionVerb::New { name: name.to_owned(), from: from.clone() }),
+                        made: Some((name.to_owned(), from)),
+                    }
+                }
+                (Some(function), ..) => Slash::Switch(Switch::Function(function.to_owned())),
+            }
+        }
         "/plane" => match rest.split_whitespace().next() {
             None => Slash::List(Request::Planes { dir: here.dir.to_owned(), name: None }),
             Some(plane) => Slash::Switch(Switch::Plane(plane.to_owned())),
@@ -209,6 +239,16 @@ mod tests {
         assert_eq!(slash("/think low", &here(false)), Slash::Think(ReasoningLevel::Low));
         assert_eq!(slash("/attach \"a b.png\"", &here(false)), Slash::Attach(PathBuf::from("a b.png")));
         assert_eq!(slash("/function f", &here(false)), Slash::Switch(Switch::Function("f".into())));
+        assert!(matches!(
+            slash("/function show f", &here(false)),
+            Slash::Function { request: Request::Function { verb: proto::FunctionVerb::Show { .. }, .. }, made: None }
+        ));
+        assert!(matches!(
+            slash("/function new twin f", &here(false)),
+            Slash::Function { made: Some((name, from)), .. } if name == "twin" && from == "f"
+        ));
+        // No Function to copy from: the usage.
+        assert!(matches!(slash("/function new twin", &here(false)), Slash::Say { failed: true, .. }));
         assert!(matches!(slash("/plane", &here(false)), Slash::List(Request::Planes { name: None, .. })));
         assert_eq!(slash("/quit", &here(false)), Slash::Quit);
     }

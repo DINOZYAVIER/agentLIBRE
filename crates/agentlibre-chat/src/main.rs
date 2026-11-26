@@ -223,6 +223,9 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
     let counts = signal([0u32; 3]);
     let confirm = signal(None::<String>);
     let switching = signal(None::<slash::Switch>);
+    // `/function new`: the name and the Function it copies, until the
+    // daemon answers.
+    let making = signal(None::<(String, String)>);
 
     // The user's settings, as the REPL reads them: the thinking, the longest
     // recording, the colors (D4, D8). A file that does not load is said, and
@@ -300,6 +303,20 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                         record_command(&out, session, "/plane", false, Some(text));
                     }
                 },
+                // `/function show`: its source and its file (AGL-102, D2).
+                Reply::Function(view) if view.text.is_some() => {
+                    let text = format!("{}\n{}", view.text.unwrap_or_default(), view.path);
+                    chat.update(|chat| chat.note(&text, Role::Muted));
+                    record_command(&out, session, &format!("/function show {}", view.name), false, Some(text));
+                }
+                // `/function new`: the copy and where it is (AGL-102, D3).
+                Reply::Function(view) if view.load.is_none() && making.with(Option::is_some) => {
+                    let (name, source) = making.get().unwrap_or_default();
+                    making.set(None);
+                    let text = tr!(lang, m::FUNCTION_NEW, name = name, source = source, path = view.path);
+                    chat.update(|chat| chat.note(&text, Role::Muted));
+                    record_command(&out, session, &format!("/function new {name} {source}"), false, Some(text));
+                }
                 // The check of `/function <name>` (AGL-036, D4).
                 Reply::Function(_) => {
                     if let Some(slash::Switch::Function(name)) = switching.get() {
@@ -361,6 +378,7 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                 Reply::Refused { error } => {
                     busy.set(false);
                     switching.set(None);
+                    making.set(None);
                     chat.update(|chat| chat.note(&error, Role::StatusFailure));
                 }
                 _ => {}
@@ -433,6 +451,7 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                     counts,
                     confirm,
                     switching,
+                    making,
                     quit: quit.clone(),
                     repl,
                     handle: handle.clone(),
@@ -531,6 +550,8 @@ struct State {
     confirm: Signal<Option<String>>,
     /// A `/function` or `/plane` switch being checked.
     switching: Signal<Option<slash::Switch>>,
+    /// A `/function new` being made.
+    making: Signal<Option<(String, String)>>,
     quit: katarsa_app::Quit,
     /// The user's `repl` settings (D4).
     repl: ReplSettings,
@@ -587,6 +608,7 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
         counts,
         confirm,
         switching,
+        making,
         quit,
         repl,
         handle,
@@ -704,6 +726,10 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
                 slash::Slash::Switch(switch) => {
                     let request = slash::check(&switch, &dir, plane.as_deref());
                     switching.set(Some(switch));
+                    send(&out, &request);
+                }
+                slash::Slash::Function { request, made } => {
+                    making.set(made);
                     send(&out, &request);
                 }
                 slash::Slash::New => send(&out, &Request::New { session: id }),
