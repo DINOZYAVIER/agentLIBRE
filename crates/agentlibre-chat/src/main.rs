@@ -18,7 +18,7 @@ use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::media::{Pending, Source};
 use agentlibre_common::reasoning::ReasoningLevel;
 use agentlibre_common::paths::Paths;
-use agentlibre_common::settings::{ReplSettings, UserFile};
+use agentlibre_common::settings::{Detail, ReplSettings, UserFile};
 use agentlibre_common::tr;
 use agentlibre_common::style::Role;
 use agentlibre_proto::{self as proto, Ask, Phase, Reply, Report, Request, Sent};
@@ -786,11 +786,13 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
         let area = cx.scroll_at_end(Sty::column().gap(8.0).grow(1.0), |_| {});
         let items = move || chat.with(|chat| (0..chat.records().len()).collect::<Vec<_>>());
         let copier = copier.clone();
-        cx.keyed_in(area, items, |at| *at, move |cx, &at| record(cx, chat, at, &copier));
+        let detail = repl.thinking;
+        cx.keyed_in(area, items, |at| *at, move |cx, &at| record(cx, chat, at, &copier, detail, lang));
         // What the step is writing now: its thinking, its text.
         cx.show(
             Sty::column().gap(6.0),
-            move || chat.with(|chat| chat.thinking.is_some()),
+            // `off` shows none of it (D4).
+            move || repl.thinking != Detail::Off && chat.with(|chat| chat.thinking.is_some()),
             move |cx| {
                 let text = prop(move || chat.with(|chat| chat.thinking.clone().unwrap_or_default()));
                 cx.paragraph(text, Tone::Dim);
@@ -972,7 +974,7 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
 /// The record `at`, as the transcript draws it (AGL-066): a message, a
 /// line, a call folded with its result (KS-042), an answer in Markdown with a
 /// button that copies its source (KS-041 D3).
-fn record(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, copier: &Ui) {
+fn record(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, copier: &Ui, detail: Detail, lang: Lang) {
     let Some(kind) = record_at(chat, at, |record| match record {
         Record::User(_) => 0,
         Record::Wake { .. } => 1,
@@ -1008,16 +1010,12 @@ fn record(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, copi
                 _ => String::new(),
             }), Tone::Dim);
         }
-        3 => tool(cx, chat, at),
+        3 => {
+            thinking(cx, chat, at, detail, lang);
+            tool(cx, chat, at);
+        }
         4 => {
-            if record_at(chat, at, |record| matches!(record, Record::Answer { thinking: Some(_), .. })) == Some(true) {
-                cx.fold("thinking", "thinking", move |cx| {
-                    cx.paragraph(read(|record| match record {
-                        Record::Answer { thinking, .. } => thinking.clone().unwrap_or_default(),
-                        _ => String::new(),
-                    }), Tone::Dim);
-                });
-            }
+            thinking(cx, chat, at, detail, lang);
             let text = read(|record| match record {
                 Record::Answer { text, .. } => text.clone(),
                 _ => String::new(),
@@ -1054,6 +1052,38 @@ fn record(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, copi
     }
 }
 
+/// The thinking of the step of the record `at`, as `repl.thinking` says
+/// (D4, D7): `off` none of it, `flexible` folded to its time, `full` open.
+fn thinking(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, detail: Detail, lang: Lang) {
+    let text = move || {
+        record_at(chat, at, |record| match record {
+            Record::Answer { thinking, .. } | Record::Tool { thinking, .. } => thinking.clone(),
+            _ => None,
+        })
+        .flatten()
+    };
+    if detail == Detail::Off || text().is_none() {
+        return;
+    }
+    let header = prop(move || {
+        let time = chat.with(|chat| chat.thinking_time(at));
+        let word = if lang == Lang::Uk { "думав" } else { "thought" };
+        match time {
+            Some(time) => format!("{word} {}", words::duration(time.as_secs().max(1))),
+            None => word.to_owned(),
+        }
+    });
+    let body = move || prop(move || text().unwrap_or_default());
+    if detail == Detail::Full {
+        cx.label(header, Tone::Dim);
+        cx.paragraph(body(), Tone::Dim);
+    } else {
+        cx.fold("thinking", header, move |cx| {
+            cx.paragraph(body(), Tone::Dim);
+        });
+    }
+}
+
 /// A call as a fold (KS-042): its header the outcome and the line of what it
 /// did, its body the thinking and the text before it, its input in full and
 /// its result.
@@ -1073,10 +1103,6 @@ fn tool(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize) {
         let part = move |read: fn(&Record) -> Option<String>| {
             move || record_at(chat, at, read).flatten().unwrap_or_default()
         };
-        let thinking = part(|record| match record {
-            Record::Tool { thinking, .. } => thinking.clone(),
-            _ => None,
-        });
         let text = part(|record| match record {
             Record::Tool { text, .. } => text.clone(),
             _ => None,
@@ -1088,10 +1114,6 @@ fn tool(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize) {
         let output = part(|record| match record {
             Record::Tool { result, .. } => result.as_ref().map(|result| result.content.clone()),
             _ => None,
-        });
-        let thinking_shown = thinking.clone();
-        cx.show(Sty::column(), move || !thinking_shown().is_empty(), move |cx| {
-            cx.paragraph(prop(thinking.clone()), Tone::Dim);
         });
         let text_shown = text.clone();
         cx.show(Sty::column(), move || !text_shown().is_empty(), move |cx| {
