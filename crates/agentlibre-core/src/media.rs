@@ -227,19 +227,17 @@ pub fn expand(
                         if hears.is_none() {
                             hears = Some(backend.hears_audio()?);
                         }
-                        match (hears == Some(true), marker_of(&mut marker, backend)?) {
-                            (true, Some(marker)) => {
-                                let bytes = read(dir, &medium.sha256, &medium.ext)?;
-                                expanded.uploads.push(base64(&bytes));
-                                out.push_str(marker);
+                        if hears != Some(true) {
+                            out.push_str(&format!("[Audio#{}: not transcribed]", medium.number));
+                        } else if let Some(marker) = marker_of(&mut marker, backend)? {
+                            let bytes = read(dir, &medium.sha256, &medium.ext)?;
+                            expanded.uploads.push(base64(&bytes));
+                            out.push_str(marker);
+                        } else {
+                            out.push_str(&format!("[Audio#{}: {NO_PROJECTOR}]", medium.number));
+                            if user {
+                                expanded.unseen = Some(at);
                             }
-                            (true, None) => {
-                                out.push_str(&format!("[Audio#{}: {NO_PROJECTOR}]", medium.number));
-                                if user {
-                                    expanded.unseen = Some(at);
-                                }
-                            }
-                            _ => out.push_str(&format!("[Audio#{}: not transcribed]", medium.number)),
                         }
                     }
                 },
