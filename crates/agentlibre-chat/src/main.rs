@@ -58,19 +58,27 @@ agl. Enter надсилає, Shift+Enter переносить рядок, Escape
   --function <назва>        нова сесія з цією Function
   -h, --help                ця довідка";
 
-/// What the command line asks.
+/// What the command line asks: the REPL's launch flags (AGL-128, D2).
 #[derive(Debug, Default, PartialEq)]
 struct Args {
     resume: Option<String>,
+    /// `--resume` with no id: the latest sessions are listed.
+    list: bool,
     plane: Option<String>,
     function: Option<String>,
+    /// `--think <level>`: the reasoning level of the messages.
+    think: Option<String>,
+    /// `--yes`: a restart of the server is agreed without asking.
+    yes: bool,
 }
 
 /// The arguments; `None` for the help.
 fn parse(args: &[String]) -> Result<Option<Args>, String> {
     let mut parsed = Args::default();
-    let mut args = args.iter();
+    let mut args = args.iter().peekable();
     while let Some(arg) = args.next() {
+        // `--resume` with nothing after it, or another option, lists.
+        let bare = args.peek().is_none_or(|next| next.starts_with("--"));
         let mut value = |name: &str| {
             args.next()
                 .cloned()
@@ -78,9 +86,19 @@ fn parse(args: &[String]) -> Result<Option<Args>, String> {
         };
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
+            // With no id, the latest are listed, as `agl --resume` does.
+            "--resume" if bare => parsed.list = true,
             "--resume" => parsed.resume = Some(value(arg)?),
             "--plane" => parsed.plane = Some(value(arg)?),
             "--function" => parsed.function = Some(value(arg)?),
+            "--think" => {
+                let level = value(arg)?;
+                if ReasoningLevel::parse(&level).is_none() {
+                    return Err(format!("--think takes off, low, medium or xhigh, not {level:?}"));
+                }
+                parsed.think = Some(level);
+            }
+            "--yes" => parsed.yes = true,
             other => return Err(format!("unknown argument {other:?}")),
         }
     }
@@ -160,6 +178,30 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
         .ok_or("XDG_RUNTIME_DIR is not set, so the daemon has no place for its socket")?;
     let words = if lang == Lang::Uk { "uk" } else { "en" };
     let out = Arc::new(Client::connect(&socket, true, words, Start::OnPath)?);
+    // `--resume` with no id: the latest sessions, as `agl --resume` lists
+    // them, and no window.
+    if args.list {
+        let request = match &args.plane {
+            Some(plane) => Request::Past { dir: None, plane: Some(plane.clone()), limit: PAST },
+            None => Request::Past { dir: Some(dir.to_string_lossy().into_owned()), plane: None, limit: PAST },
+        };
+        send(&out, &request);
+        loop {
+            match out.next()? {
+                Reply::Past { sessions } => {
+                    if sessions.is_empty() {
+                        println!("{}", tr!(lang, m::NO_SESSIONS));
+                    }
+                    for session in sessions {
+                        println!("{}  {}  {}", session.id, session.time, session.name.unwrap_or(session.first));
+                    }
+                    return Ok(true);
+                }
+                Reply::Refused { error } => return Err(error.into()),
+                _ => {}
+            }
+        }
+    }
     let chat = signal_chat(lang);
     let session = signal(None::<String>);
     let busy = signal(false);
@@ -216,7 +258,9 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                         context: opened.context,
                         ..words::Info::default()
                     });
-                    reasoning.set(opened.reasoning.as_deref().and_then(ReasoningLevel::parse));
+                    if let Some(level) = opened.reasoning.as_deref().and_then(ReasoningLevel::parse) {
+                        reasoning.set(Some(level));
+                    }
                     counts.set(opened.session.media);
                     pending.set(Vec::new());
                     let id = opened.session.id;
@@ -343,7 +387,17 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
             error: "the daemon went".into(),
         });
     });
-    send(&out, &place.open(args.resume, args.function));
+    // `--think` holds for the messages; `--yes` agrees to a restart.
+    if let Some(level) = args.think.as_deref().and_then(ReasoningLevel::parse) {
+        reasoning.set(Some(level));
+    }
+    let mut first = place.open(args.resume, args.function);
+    if let Request::Open(open) = &mut first {
+        open.reasoning = args.think.clone();
+        open.yes = args.yes;
+        open.start_server = repl.start_server;
+    }
+    send(&out, &first);
 
     let title = dir.file_name().map_or_else(
         || dir.display().to_string(),
@@ -1228,15 +1282,24 @@ mod tests {
     fn the_command_line_names_a_session_a_plane_and_a_function() {
         assert_eq!(args(&[]), Ok(Some(Args::default())));
         assert_eq!(
-            args(&["--resume", "last", "--plane", "work", "--function", "f"]),
+            args(&["--resume", "last", "--plane", "work", "--function", "f", "--think", "low", "--yes"]),
             Ok(Some(Args {
                 resume: Some("last".into()),
                 plane: Some("work".into()),
                 function: Some("f".into()),
+                think: Some("low".into()),
+                yes: true,
+                ..Args::default()
             }))
         );
+        // With no id it lists.
+        assert_eq!(args(&["--resume"]), Ok(Some(Args { list: true, ..Args::default() })));
+        assert_eq!(
+            args(&["--resume", "--plane", "p"]),
+            Ok(Some(Args { list: true, plane: Some("p".into()), ..Args::default() }))
+        );
+        assert!(args(&["--think", "much"]).is_err());
         assert_eq!(args(&["--help"]), Ok(None));
-        assert!(args(&["--resume"]).is_err());
         assert!(args(&["--what"]).is_err());
     }
 }
