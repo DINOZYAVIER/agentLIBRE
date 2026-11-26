@@ -5,8 +5,8 @@
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::tr;
 use agentlibre_common::style::Role;
-use agentlibre_proto::{Done, Event, PhaseEvent, PhaseTime, Report, Sent, StopReason, TurnEnd};
-use agentlibre_surface::records::{Fold, Record};
+use agentlibre_proto::{Done, Event, PhaseEvent, PhaseTime, Report, Sent, StopReason, Told, TurnEnd};
+use agentlibre_surface::records::{self, Fold, Record};
 
 /// The session as the chat shows it.
 pub struct Chat {
@@ -99,8 +99,26 @@ impl Chat {
             Some(Err(error)) => self.note(error, Role::StatusFailure),
             _ => {}
         }
-        if let Some(Err(error)) = &done.said {
-            self.note(error, Role::StatusFailure);
+        match &done.said {
+            Some(Err(error)) => self.note(error, Role::StatusFailure),
+            // What a slash command said, as the REPL shows it.
+            Some(Ok(said)) => {
+                for told in &said.lines {
+                    let (text, role) = match told {
+                        Told::Output(text) | Told::Notice(text) => (text, Role::Muted),
+                        Told::Refusal(text) | Told::Fault(text) => (text, Role::StatusFailure),
+                        Told::Pending(text) => (text, Role::StatusPending),
+                    };
+                    self.note(text, role);
+                }
+                if let Some(write) = &said.memory {
+                    self.note(&records::memory_line(&write.name, write.kind, self.lang), Role::Muted);
+                }
+                if let Some(text) = &said.record_error {
+                    self.note(text, Role::StatusFailure);
+                }
+            }
+            None => {}
         }
     }
 }

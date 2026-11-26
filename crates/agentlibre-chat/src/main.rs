@@ -10,16 +10,22 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 mod chat;
+mod slash;
 
 use agentlibre_client::{Client, Start};
-use agentlibre_common::i18n::Lang;
+use agentlibre_common::i18n::{Lang, m};
+use agentlibre_common::media::{Pending, Source};
+use agentlibre_common::reasoning::ReasoningLevel;
+use agentlibre_common::tr;
 use agentlibre_common::style::Role;
 use agentlibre_proto::{self as proto, Ask, Phase, Reply, Report, Request, Sent};
 use agentlibre_surface::records::{self, Record};
+use agentlibre_surface::{attach, words};
 use chat::Chat;
 use katarsa_app::App;
 use katarsa_reactive::signal;
 use katarsa_ui::reactive::{Ui, prop};
+use katarsa_ui::{Key, KeyInput};
 use katarsa_ui::retained::{Sty, Tone};
 use katarsa_ui::style::{Keys, Sheet, Style, StyleBuilder};
 use katarsa_wayland::WindowConfig;
@@ -155,10 +161,18 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
     let sidebar = signal(true);
     let place = Place {
         dir: dir.to_string_lossy().into_owned(),
-        plane: args.plane.clone(),
+        plane: signal(args.plane.clone()),
     };
+    let facts = signal(None::<words::Facts>);
+    let info = signal(words::Info::default());
+    let reasoning = signal(None::<ReasoningLevel>);
+    let pending = signal(Vec::<Pending>::new());
+    let counts = signal([0u32; 3]);
+    let confirm = signal(None::<String>);
+    let switching = signal(None::<slash::Switch>);
 
     let mut app = App::new("agl-chat")?;
+    let quit = app.quitter();
     {
         let out = Arc::clone(&out);
         let place = place.clone();
@@ -166,12 +180,65 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
             let ours = |of: &str| session.with(|session| session.as_deref() == Some(of));
             match reply {
                 Reply::Opened(opened) => {
+                    facts.set(Some(words::Facts {
+                        function: opened.function.clone(),
+                        workspace: opened.workspace.clone(),
+                        plane: opened.session.plane.clone(),
+                        server: opened.server_url.clone(),
+                    }));
+                    info.set(words::Info {
+                        session: opened.session.id.clone(),
+                        unfinished: opened.session.unfinished.clone(),
+                        context: opened.context,
+                        ..words::Info::default()
+                    });
+                    reasoning.set(opened.reasoning.as_deref().and_then(ReasoningLevel::parse));
+                    counts.set(opened.session.media);
+                    pending.set(Vec::new());
                     let id = opened.session.id;
                     session.set(Some(id.clone()));
                     send(&out, &Request::History { session: id });
                     send(&out, &place.past());
                 }
                 Reply::Past { sessions } => past.set(sessions),
+                // `/function` with no name (AGL-036, D3).
+                Reply::Functions { functions } => {
+                    let lines = records::function_lines(&functions, lang).join("\n");
+                    chat.update(|chat| chat.note(&lines, Role::Muted));
+                    record_command(&out, session, "/function", false, Some(lines));
+                }
+                // `/plane`'s list, or the check of `/plane <name>` (AGL-077, D12).
+                Reply::Planes { planes } => match switching.get() {
+                    Some(slash::Switch::Plane(name)) => {
+                        switching.set(None);
+                        let line = tr!(lang, m::PLANE_SWITCH, name = name);
+                        chat.update(|chat| chat.note(&line, Role::Muted));
+                        record_command(&out, session, &format!("/plane {name}"), false, None);
+                        place.plane.set(Some(name));
+                        reopen(&out, &place, session, chat, None, None);
+                    }
+                    _ => {
+                        let none = "\u{2014}".to_owned();
+                        let text = tr!(
+                            lang,
+                            m::PLANE_HERE,
+                            plane = place.plane.get().unwrap_or_else(|| none.clone()),
+                            planes = if planes.is_empty() { none.clone() } else { planes.join(", ") }
+                        );
+                        chat.update(|chat| chat.note(&text, Role::Muted));
+                        record_command(&out, session, "/plane", false, Some(text));
+                    }
+                },
+                // The check of `/function <name>` (AGL-036, D4).
+                Reply::Function(_) => {
+                    if let Some(slash::Switch::Function(name)) = switching.get() {
+                        switching.set(None);
+                        let line = tr!(lang, m::FUNCTION_SWITCH, name = name);
+                        chat.update(|chat| chat.note(&line, Role::Muted));
+                        record_command(&out, session, &format!("/function {name}"), false, None);
+                        reopen(&out, &place, session, chat, None, Some(name));
+                    }
+                }
                 Reply::History {
                     events, transitions, ..
                 } => chat.update(|chat| chat.history(&events, &transitions)),
@@ -186,6 +253,13 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                 } if ours(&of) => {
                     // A session's first message or a rename shows in the list.
                     send(&out, &place.past());
+                    counts.set(done.session.media);
+                    // `/new` gives the session the client goes on with.
+                    if !done.session.id.is_empty() && !ours(&done.session.id) {
+                        session.set(Some(done.session.id.clone()));
+                        info.update(|info| info.session = done.session.id.clone());
+                        chat.update(|chat| chat.history(&[], &[]));
+                    }
                     if done.turn.is_some() {
                         busy.set(false);
                     }
@@ -215,6 +289,7 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                 }
                 Reply::Refused { error } => {
                     busy.set(false);
+                    switching.set(None);
                     chat.update(|chat| chat.note(&error, Role::StatusFailure));
                 }
                 _ => {}
@@ -244,16 +319,7 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
             error: "the daemon went".into(),
         });
     });
-    send(
-        &out,
-        &Request::Open(proto::Open {
-            dir: dir.to_string_lossy().into_owned(),
-            plane: args.plane,
-            resume: args.resume,
-            function: args.function,
-            ..proto::Open::default()
-        }),
-    );
+    send(&out, &place.open(args.resume, args.function));
 
     let title = dir.file_name().map_or_else(
         || dir.display().to_string(),
@@ -278,6 +344,15 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                     past,
                     sidebar,
                     place: place.clone(),
+                    lang,
+                    facts,
+                    info,
+                    reasoning,
+                    pending,
+                    counts,
+                    confirm,
+                    switching,
+                    quit: quit.clone(),
                 },
             )
         },
@@ -290,7 +365,8 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
 #[derive(Clone)]
 struct Place {
     dir: String,
-    plane: Option<String>,
+    /// The plane of the session; `/plane <name>` moves it (AGL-077, D12).
+    plane: Signal<Option<String>>,
 }
 
 /// How many past sessions the list shows, as `agl --resume` lists them.
@@ -300,20 +376,47 @@ impl Place {
     /// The request of the sessions of the directory's project, or of its
     /// plane (AGL-126, D9; AGL-128, D6).
     fn past(&self) -> Request {
-        match &self.plane {
-            Some(plane) => Request::Past { dir: None, plane: Some(plane.clone()), limit: PAST },
+        match self.plane.get() {
+            Some(plane) => Request::Past { dir: None, plane: Some(plane), limit: PAST },
             None => Request::Past { dir: Some(self.dir.clone()), plane: None, limit: PAST },
         }
     }
 
-    /// The request that opens the session `resume`, or a new one.
-    fn open(&self, resume: Option<String>) -> Request {
+    /// The request that opens the session `resume`, or a new one, with
+    /// `function`.
+    fn open(&self, resume: Option<String>, function: Option<String>) -> Request {
         Request::Open(proto::Open {
             dir: self.dir.clone(),
-            plane: self.plane.clone(),
+            plane: self.plane.get(),
             resume,
+            function,
             ..proto::Open::default()
         })
+    }
+}
+
+/// Leaves the session for `resume`, or a new one with `function`: this one
+/// closed, the chat emptied, the other's past coming with its `opened`.
+fn reopen(
+    out: &Client,
+    place: &Place,
+    session: Signal<Option<String>>,
+    chat: Signal<Chat>,
+    resume: Option<String>,
+    function: Option<String>,
+) {
+    if let Some(id) = session.get() {
+        send(out, &Request::Close { session: id });
+    }
+    session.set(None);
+    chat.update(|chat| chat.history(&[], &[]));
+    send(out, &place.open(resume, function));
+}
+
+/// A command's line in the session's record (AGL-047, D5).
+fn record_command(out: &Client, session: Signal<Option<String>>, line: &str, failed: bool, output: Option<String>) {
+    if let Some(id) = session.get() {
+        send(out, &slash::record(&id, line, failed, output));
     }
 }
 
@@ -330,6 +433,21 @@ struct State {
     /// Whether the list of sessions shows (D1).
     sidebar: Signal<bool>,
     place: Place,
+    lang: Lang,
+    /// What `/status` says (D134).
+    facts: Signal<Option<words::Facts>>,
+    info: Signal<words::Info>,
+    /// The reasoning level of the next messages (`/think`).
+    reasoning: Signal<Option<ReasoningLevel>>,
+    /// The media waiting for the next message (AGL-014, D18).
+    pending: Signal<Vec<Pending>>,
+    /// The media the session holds, of each kind.
+    counts: Signal<[u32; 3]>,
+    /// `/memory remove <name>`, asked first.
+    confirm: Signal<Option<String>>,
+    /// A `/function` or `/plane` switch being checked.
+    switching: Signal<Option<slash::Switch>>,
+    quit: katarsa_app::Quit,
 }
 
 /// The chat, as a signal.
@@ -355,6 +473,15 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
         past,
         sidebar,
         place,
+        lang,
+        facts,
+        info,
+        reasoning,
+        pending,
+        counts,
+        confirm,
+        switching,
+        quit,
     } = state;
     let ui = Ui::new("chat");
     ui.styles(styles()).expect("the chat's styles work out");
@@ -365,15 +492,9 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
         let out = Arc::clone(out);
         let place = place.clone();
         move |resume: Option<String>| {
-            if busy.get() {
-                return;
+            if !busy.get() {
+                reopen(&out, &place, session, chat, resume, None);
             }
-            if let Some(id) = session.get() {
-                send(&out, &Request::Close { session: id });
-            }
-            session.set(None);
-            chat.update(|chat| chat.history(&[], &[]));
-            send(&out, &place.open(resume));
         }
     };
     let stop = {
@@ -403,27 +524,123 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
             }
         }
     };
+    // A file attached to the next message: its placeholder goes into the
+    // field, numbered after the session's media (AGL-014, D18).
+    let attach_file = move |path: std::path::PathBuf| match Source::from_file(&path) {
+        Ok(source) => {
+            let name = source.name.clone();
+            let mut placeholder = String::new();
+            pending.update(|pending| placeholder = attach::add_counted(&counts.get(), pending, source));
+            let line = tr!(lang, m::ATTACHED, placeholder = placeholder, name = name);
+            chat.update(|chat| chat.note(&line, Role::Muted));
+            prompt.update(|prompt| {
+                prompt.push_str(&placeholder);
+                prompt.push(' ');
+            });
+        }
+        Err(error) => chat.update(|chat| chat.note(&error.message(lang), Role::StatusFailure)),
+    };
+    // A `/` line: what the REPL does with it (D5).
+    let command = {
+        let out = Arc::clone(out);
+        let place = place.clone();
+        move |line: &str| {
+            let Some(id) = session.get() else { return };
+            let (dir, plane) = (place.dir.clone(), place.plane.get());
+            let facts = facts.get();
+            let info = info.get();
+            let here = slash::Here {
+                lang,
+                session: &id,
+                dir: &dir,
+                plane: plane.as_deref(),
+                busy: busy.get(),
+                reasoning: reasoning.get(),
+                facts: facts.as_ref(),
+                info: &info,
+            };
+            match slash::slash(line, &here) {
+                slash::Slash::Say { text, failed, line } => {
+                    let role = if failed { Role::StatusFailure } else { Role::Muted };
+                    chat.update(|chat| chat.note(&text, role));
+                    send(&out, &slash::record(&id, &line, failed, Some(text)));
+                }
+                slash::Slash::Ask(request) => send(&out, &request),
+                slash::Slash::Think(level) => {
+                    reasoning.set(Some(level));
+                    let shown = words::reasoning_level(Some(level), lang);
+                    let text = tr!(lang, m::THINK_LEVEL, level = shown);
+                    chat.update(|chat| chat.note(&text, Role::Muted));
+                }
+                slash::Slash::Attach(path) => attach_file(path),
+                slash::Slash::Confirm { name } => confirm.set(Some(name)),
+                slash::Slash::List(request) => send(&out, &request),
+                slash::Slash::Switch(switch) => {
+                    let request = slash::check(&switch, &dir, plane.as_deref());
+                    switching.set(Some(switch));
+                    send(&out, &request);
+                }
+                slash::Slash::New => send(&out, &Request::New { session: id }),
+                slash::Slash::Quit => quit.quit(),
+            }
+        }
+    };
     let submit = {
         let out = Arc::clone(out);
+        let command = command.clone();
         move |text: String| {
             let text = text.trim().to_owned();
             let Some(id) = session.get() else { return };
             if text.is_empty() {
                 return;
             }
+            prompt.set(String::new());
+            if text.starts_with('/') {
+                command(&text);
+                return;
+            }
+            // Every pending medium goes; one whose placeholder the human
+            // deleted is dropped by the daemon (AGL-014, D21).
+            let attached = pending.with(|pending| pending.iter().map(attach::attached).collect());
+            pending.set(Vec::new());
             send(
                 &out,
                 &Request::Say {
                     session: id,
                     message: text.clone(),
-                    attached: Vec::new(),
-                    reasoning: None,
+                    attached,
+                    reasoning: reasoning.get().map(|level| level.name().to_owned()),
                 },
             );
             chat.update(|chat| chat.said(&text));
-            prompt.set(String::new());
             busy.set(true);
         }
+    };
+    // `/memory remove <name>`, once agreed.
+    let remove = {
+        let out = Arc::clone(out);
+        move |yes: bool| {
+            if let (Some(name), Some(id), true) = (confirm.get(), session.get(), yes) {
+                send(&out, &Request::Remove { session: id, name });
+            }
+            confirm.set(None);
+        }
+    };
+    // The `/` menu over the field (D5; KS-050): open while the field holds
+    // a `/` and a name being typed, narrowed to the names it starts.
+    let menu_open = signal(false);
+    let menu_pick = signal(0usize);
+    let menu = slash::menu(lang);
+    let shown = {
+        let menu = menu.clone();
+        katarsa_reactive::memo(move || {
+            let typed = prompt.get();
+            menu.iter()
+                .enumerate()
+                .filter(|(_, (name, _))| name.starts_with(typed.trim_end()))
+                .map(|(at, _)| at)
+                .collect::<Vec<_>>()
+        })
     };
     // What the copy buttons copy through (KS-041 D3).
     let copier = ui.clone();
@@ -514,15 +731,85 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
                 cx.button("stop", "Stop", stop);
             },
         );
+        let remove = remove.clone();
+        cx.show(
+            Sty::row().gap(8.0).centre_across(),
+            move || confirm.with(Option::is_some),
+            move |cx| {
+                let text = prop(move || {
+                    // The buttons answer: the terminal's `[y/N]` is not shown.
+                    confirm
+                        .get()
+                        .map(|name| tr!(lang, m::MEMORY_REMOVE_ASK, name = name).trim_end_matches(" [y/N]").to_owned())
+                        .unwrap_or_default()
+                });
+                cx.paragraph(text, Tone::Normal);
+                let (yes, no) = (remove.clone(), remove.clone());
+                cx.button("remove-yes", "Yes", move || yes(true));
+                cx.button("remove-no", "No", move || no(false));
+            },
+        );
         let submit = submit.clone();
-        cx.area(
+        let field = cx.area(
             "prompt",
             "Message",
             prompt,
             100_000,
             8,
-            move |text| prompt.set(text),
+            move |text: String| {
+                menu_open.set(text.starts_with('/') && !text.contains(char::is_whitespace));
+                menu_pick.set(0);
+                prompt.set(text);
+            },
             submit,
+        );
+        let pick = {
+            let menu = menu.clone();
+            move || shown.get().get(menu_pick.get()).map(|&at| menu[at].0)
+        };
+        let take = pick.clone();
+        cx.on_field_key(field, move |key| {
+            if !menu_open.get() {
+                return false;
+            }
+            let KeyInput::Press { key, .. } = &key.input else {
+                return false;
+            };
+            let count = shown.get().len();
+            match key {
+                Key::Up => menu_pick.set(menu_pick.get().saturating_sub(1)),
+                Key::Down => menu_pick.set((menu_pick.get() + 1).min(count.saturating_sub(1))),
+                Key::Enter => {
+                    if let Some(name) = take() {
+                        prompt.set(format!("{name} "));
+                    }
+                    menu_open.set(false);
+                }
+                Key::Escape => menu_open.set(false),
+                _ => return false,
+            }
+            true
+        });
+        let rows = menu.clone();
+        cx.popup_over(
+            "commands",
+            field,
+            move || shown.get().iter().fold(0u64, |key, &at| key * 31 + at as u64 + 1),
+            menu_open,
+            move |cx| {
+                for (row, &at) in shown.get().iter().enumerate() {
+                    let (name, what) = rows[at];
+                    cx.item(
+                        name,
+                        format!("{name}  {what}"),
+                        prop(move || menu_pick.get() == row),
+                        move || {
+                            prompt.set(format!("{name} "));
+                            menu_open.set(false);
+                        },
+                    );
+                }
+            },
         );
         });
     });
