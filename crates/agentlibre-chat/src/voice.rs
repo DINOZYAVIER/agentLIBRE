@@ -1,16 +1,18 @@
-//! The voice of the chat, as the REPL's (AGL-016, AGL-123; AGL-128, D2):
-//! Ctrl-R or Alt-R records the microphone, the second press stops it, and
-//! the daemon transcribes it with the session's whisper (AGL-127, D4;
-//! AGL-136). A dictation begun or touched with Alt-R asks: its text goes into
-//! the field; one with Ctrl-R alone is sent.
+//! The voice of the chat, as the REPL's (AGL-016, AGL-122, AGL-123; AGL-128,
+//! D2): Ctrl-R records the microphone and sends the text, Alt-R records and
+//! asks, the text going into the field; Alt-R over a recording flips the
+//! two, Ctrl-R ends it. The daemon transcribes the recording with the
+//! session's whisper (AGL-127, D4; AGL-136), and, when it has a draft
+//! server, the chunks as the human speaks: the draft grows in the field.
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use agentlibre_common::i18n::Lang;
 use agentlibre_common::paths::Paths;
-use agentlibre_surface::dictation::{Dictation, RemoteVoice};
-use agentlibre_surface::record::{self, Recording};
+use agentlibre_surface::dictation::{Dictation, DraftEngine, DraftWorker, RemoteDraft, RemoteVoice, merge_draft};
+use agentlibre_surface::record::{self, Recording, Vad};
 
 /// What the text of a dictation does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,50 +23,95 @@ pub enum Mode {
     Ask,
 }
 
-/// A recording under way, and what its text does.
-type Under = Option<(Box<dyn Recording>, Mode)>;
+/// A recording under way.
+struct Under {
+    recording: Box<dyn Recording>,
+    mode: Mode,
+    /// The draft engine at work, when the daemon has a draft server.
+    draft: Option<DraftWorker>,
+    /// The draft so far.
+    drafted: String,
+}
 
 /// The microphone of the window.
 #[derive(Default, Clone)]
 pub struct Voice {
-    recording: Rc<RefCell<Under>>,
+    under: Rc<RefCell<Option<Under>>>,
 }
 
 /// What a press of Ctrl-R or Alt-R did.
 pub enum Press {
-    /// A recording began.
-    Started,
-    /// The recording ended: its WAV, and what its text does.
+    /// A recording began, in this mode.
+    Started(Mode),
+    /// Alt-R over a recording: its mode now.
+    Flipped(Mode),
+    /// Ctrl-R ended the recording: its WAV, and what its text does.
     Stopped(Vec<u8>, Mode),
     /// It failed: the error, said.
     Failed(String),
 }
 
 impl Voice {
-    /// A press of Ctrl-R (`alt` false) or Alt-R: the first starts a
-    /// recording of at most `limit` seconds, the second stops it.
-    pub fn press(&self, alt: bool, limit: u32, lang: Lang) -> Press {
-        let mode = if alt { Mode::Ask } else { Mode::Send };
-        let mut slot = self.recording.borrow_mut();
-        match slot.take() {
-            None => match record::start(limit) {
-                Ok(recording) => {
-                    *slot = Some((recording, mode));
-                    Press::Started
-                }
-                Err(error) => Press::Failed(error.message(lang)),
-            },
-            Some((recording, began)) => {
-                // Alt-R at either end asks (AGL-123).
-                let mode = if began == Mode::Ask { Mode::Ask } else { mode };
-                match recording.stop() {
-                    Ok(wav) => Press::Stopped(wav, mode),
-                    Err(error) => Press::Failed(error.message(lang)),
-                }
+    /// A press of Ctrl-R (`alt` false) or Alt-R. A new recording lasts at
+    /// most `limit` seconds; with `draft` its chunks are drafted as it goes.
+    pub fn press(&self, alt: bool, limit: u32, draft: Option<(String, Lang)>, lang: Lang) -> Press {
+        let mut slot = self.under.borrow_mut();
+        if let Some(under) = slot.as_mut() {
+            if alt {
+                under.mode = if under.mode == Mode::Ask { Mode::Send } else { Mode::Ask };
+                return Press::Flipped(under.mode);
             }
+            let under = slot.take().expect("a recording");
+            return match under.recording.stop() {
+                Ok(wav) => Press::Stopped(wav, under.mode),
+                Err(error) => Press::Failed(error.message(lang)),
+            };
+        }
+        let mode = if alt { Mode::Ask } else { Mode::Send };
+        // With a draft server the recording chunks (AGL-122, D5, D6); one
+        // that cannot chunk falls back to the plain recording.
+        let (recording, draft) = match draft {
+            Some((session, lang)) => match record::start_chunked(limit, Vad::default()) {
+                Ok(recording) => {
+                    let engine = Paths::from_env(|name| std::env::var_os(name))
+                        .ok()
+                        .map(|paths| Arc::new(RemoteDraft { paths, session, lang }) as Arc<dyn DraftEngine>);
+                    (Ok(recording), engine.map(DraftWorker::start))
+                }
+                Err(_) => (record::start(limit), None),
+            },
+            None => (record::start(limit), None),
+        };
+        match recording {
+            Ok(recording) => {
+                *slot = Some(Under { recording, mode, draft, drafted: String::new() });
+                Press::Started(mode)
+            }
+            Err(error) => Press::Failed(error.message(lang)),
         }
     }
 
+    /// Whether a recording is under way.
+    pub fn recording(&self) -> bool {
+        self.under.borrow().is_some()
+    }
+
+    /// The draft, grown by the chunks finished since the last look; `None`
+    /// when nothing new came.
+    pub fn draft(&self) -> Option<String> {
+        let mut slot = self.under.borrow_mut();
+        let under = slot.as_mut()?;
+        let worker = under.draft.as_ref()?;
+        while let Some((wav, end)) = under.recording.poll_chunk() {
+            let _ = worker.chunks.send((wav, end));
+        }
+        let mut grown = false;
+        while let Ok((text, _)) = worker.texts.try_recv() {
+            under.drafted = merge_draft(&under.drafted, &text);
+            grown = true;
+        }
+        grown.then(|| under.drafted.clone())
+    }
 }
 
 /// The text of `wav`, by the daemon's transcription of the session

@@ -135,6 +135,17 @@ fn lang() -> Lang {
 /// What a reply of the daemon does.
 type OnReply = Box<dyn FnMut(Reply)>;
 
+/// Ends the ticks of a dictation's draft.
+fn stop_ticking(ticker: Signal<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>) {
+    if let Some(ticking) = ticker.get() {
+        ticking.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    ticker.set(None);
+}
+
+/// What a tick of a dictation's draft does.
+type OnTick = Box<dyn FnMut()>;
+
 /// What the text of a dictation does, once the daemon gave it.
 type OnVoice = Box<dyn FnMut(Result<String, String>, voice::Mode)>;
 
@@ -143,6 +154,8 @@ thread_local! {
     static ON_REPLY: RefCell<Option<OnReply>> = const { RefCell::new(None) };
     /// What a dictation's text does, on the loop's thread.
     static ON_VOICE: RefCell<Option<OnVoice>> = const { RefCell::new(None) };
+    /// What a tick of a dictation's draft does, on the loop's thread.
+    static ON_TICK: RefCell<Option<OnTick>> = const { RefCell::new(None) };
 }
 
 /// Sends `request` to the daemon; a daemon gone is told by the reader.
@@ -221,6 +234,8 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
     let reasoning = signal(None::<ReasoningLevel>);
     let pending = signal(Vec::<Pending>::new());
     let counts = signal([0u32; 3]);
+    // Whether the daemon has a draft server for the dictation (AGL-127, D4).
+    let drafts = signal(false);
     let confirm = signal(None::<String>);
     let switching = signal(None::<slash::Switch>);
     // `/function new`: the name and the Function it copies, until the
@@ -268,6 +283,7 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                         reasoning.set(Some(level));
                     }
                     counts.set(opened.session.media);
+                    drafts.set(opened.drafts);
                     pending.set(Vec::new());
                     let id = opened.session.id;
                     session.set(Some(id.clone()));
@@ -452,6 +468,7 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                     confirm,
                     switching,
                     making,
+                    drafts,
                     quit: quit.clone(),
                     repl,
                     handle: handle.clone(),
@@ -552,6 +569,8 @@ struct State {
     switching: Signal<Option<slash::Switch>>,
     /// A `/function new` being made.
     making: Signal<Option<(String, String)>>,
+    /// Whether the daemon drafts a dictation.
+    drafts: Signal<bool>,
     quit: katarsa_app::Quit,
     /// The user's `repl` settings (D4).
     repl: ReplSettings,
@@ -561,11 +580,14 @@ struct State {
     colors: Vec<(Role, agentlibre_common::style::Style)>,
 }
 
-/// What the line over the field says while the microphone records.
-fn recording_line(lang: Lang) -> String {
-    match lang {
-        Lang::Uk => "запис… Ctrl-R надсилає, Alt-R ставить у рядок".into(),
-        _ => "recording… Ctrl-R sends, Alt-R puts it in the line".into(),
+/// What the line over the field says while the microphone records, in
+/// `mode`: Ctrl-R ends it, Alt-R flips what its text does (AGL-123, D11).
+fn recording_line(mode: voice::Mode, lang: Lang) -> String {
+    match (lang, mode) {
+        (Lang::Uk, voice::Mode::Send) => "запис… Ctrl-R завершить і надішле; Alt-R — у рядок".into(),
+        (Lang::Uk, voice::Mode::Ask) => "запис… Ctrl-R завершить, текст піде в рядок; Alt-R — надіслати".into(),
+        (_, voice::Mode::Send) => "recording… Ctrl-R ends and sends; Alt-R: into the line".into(),
+        (_, voice::Mode::Ask) => "recording… Ctrl-R ends, the text goes into the line; Alt-R: send".into(),
     }
 }
 
@@ -609,6 +631,7 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
         confirm,
         switching,
         making,
+        drafts,
         quit,
         repl,
         handle,
@@ -670,8 +693,11 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
     // (D2), and the one recalled.
     let sent = signal(Vec::<String>::new());
     let recalled = signal(None::<usize>);
-    // What the microphone is doing, while it does.
+    // What the microphone is doing, while it does; the field as it was when
+    // the dictation began; what keeps the draft's ticks going.
     let heard = signal(None::<String>);
+    let before = signal(String::new());
+    let ticker = signal(None::<std::sync::Arc<std::sync::atomic::AtomicBool>>);
     // A file attached to the next message: its placeholder goes into the
     // field, numbered after the session's media (AGL-014, D18).
     let attach_file = move |path: std::path::PathBuf| match Source::from_file(&path) {
@@ -776,26 +802,78 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
         let submit = submit.clone();
         let on_voice = move |text: Result<String, String>, mode: voice::Mode| {
             heard.set(None);
+            // The field holds what was typed before the dictation began.
+            let base = before.get();
             match (text, mode) {
-                (Ok(text), voice::Mode::Send) if !text.trim().is_empty() => submit(text),
-                (Ok(text), _) => prompt.update(|prompt| prompt.push_str(text.trim())),
-                (Err(error), _) => chat.update(|chat| chat.note(&error, Role::StatusFailure)),
+                (Ok(text), voice::Mode::Send) if !text.trim().is_empty() => {
+                    submit(text);
+                    prompt.set(base);
+                }
+                (Ok(text), _) => prompt.set(format!("{base}{}", text.trim())),
+                (Err(error), _) => {
+                    prompt.set(base);
+                    chat.update(|chat| chat.note(&error, Role::StatusFailure));
+                }
             }
         };
         ON_VOICE.with(|slot| *slot.borrow_mut() = Some(Box::new(on_voice)));
     }
     let microphone = voice::Voice::default();
-    // Ctrl-R or Alt-R (D2): the first press records, the second stops and
-    // hands the recording to the daemon's whisper.
+    // The draft grows in the field while the human speaks (AGL-122): the
+    // loop looks at the recording's chunks ten times a second.
+    {
+        let microphone = microphone.clone();
+        let on_tick = move || {
+            if let Some(draft) = microphone.draft() {
+                prompt.set(format!("{}{draft}", before.get()));
+            }
+        };
+        ON_TICK.with(|slot| *slot.borrow_mut() = Some(Box::new(on_tick)));
+    }
+    // Ctrl-R or Alt-R (D2): a press records; over a recording Alt-R flips
+    // what its text does and Ctrl-R ends it, the daemon's whisper making the
+    // text (AGL-123, D11).
     let press = {
         let microphone = microphone.clone();
-        move |alt: bool| match microphone.press(alt, repl.max_record_seconds, lang) {
-            voice::Press::Started => heard.set(Some(recording_line(lang))),
+        let handle = handle.clone();
+        move |alt: bool| {
+            let draft = (drafts.get() && !microphone.recording())
+                .then(|| session.get())
+                .flatten()
+                .map(|id| (id, lang));
+            match microphone.press(alt, repl.max_record_seconds, draft, lang) {
+            voice::Press::Started(mode) => {
+                before.set(prompt.get());
+                heard.set(Some(recording_line(mode, lang)));
+                let handle = handle.clone();
+                let ticking = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                ticker.set(Some(std::sync::Arc::clone(&ticking)));
+                std::thread::spawn(move || {
+                    while ticking.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        let posted = handle.post(|| {
+                            ON_TICK.with(|slot| {
+                                if let Some(tick) = slot.borrow_mut().as_mut() {
+                                    tick();
+                                }
+                            });
+                        });
+                        if !posted {
+                            return;
+                        }
+                    }
+                });
+            }
+            voice::Press::Flipped(mode) => heard.set(Some(recording_line(mode, lang))),
             voice::Press::Failed(error) => {
+                stop_ticking(ticker);
                 heard.set(None);
                 chat.update(|chat| chat.note(&error, Role::StatusFailure));
             }
             voice::Press::Stopped(wav, mode) => {
+                stop_ticking(ticker);
+                // The draft gives way to the whole recording's text.
+                prompt.set(before.get());
                 let Some(id) = session.get() else {
                     heard.set(None);
                     return;
@@ -812,6 +890,7 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
                         });
                     });
                 });
+            }
             }
         }
     };
