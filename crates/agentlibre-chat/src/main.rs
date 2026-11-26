@@ -555,7 +555,18 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
             }
         }
     };
-    ui.on_cancel(stop.clone());
+    // Escape leaves the inspect view first, then stops the turn.
+    let inspect = signal(false);
+    {
+        let stop = stop.clone();
+        ui.on_cancel(move || {
+            if inspect.get() {
+                inspect.set(false);
+            } else {
+                stop();
+            }
+        });
+    }
     let answer = {
         let out = Arc::clone(out);
         move |yes: bool| {
@@ -782,12 +793,22 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
             // The font has no menu glyph: a word.
             let button = cx.button("sessions", "sessions", move || sidebar.set(!sidebar.get()));
             cx.class(button, "fold");
+            // The REPL's Ctrl-O (D2): the session's records in full.
+            let button = cx.button("inspect", "inspect", move || inspect.set(!inspect.get()));
+            cx.class(button, "fold");
         });
-        let area = cx.scroll_at_end(Sty::column().gap(8.0).grow(1.0), |_| {});
         let items = move || chat.with(|chat| (0..chat.records().len()).collect::<Vec<_>>());
         let copier = copier.clone();
         let detail = repl.thinking;
-        cx.keyed_in(area, items, |at| *at, move |cx, &at| record(cx, chat, at, &copier, detail, lang));
+        cx.show(Sty::column().grow(1.0), move || !inspect.get(), move |cx| {
+            let area = cx.scroll_at_end(Sty::column().gap(8.0).grow(1.0), |_| {});
+            let copier = copier.clone();
+            cx.keyed_in(area, items, |at| *at, move |cx, &at| record(cx, chat, at, &copier, detail, lang));
+        });
+        cx.show(Sty::column().grow(1.0), move || inspect.get(), move |cx| {
+            let area = cx.scroll_at_end(Sty::column().gap(10.0).grow(1.0), |_| {});
+            cx.keyed_in(area, items, |at| *at, move |cx, &at| inspected(cx, chat, at));
+        });
         // What the step is writing now: its thinking, its text.
         cx.show(
             Sty::column().gap(6.0),
@@ -880,6 +901,11 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
         let take = pick.clone();
         let press = press.clone();
         cx.on_field_key(field, move |key| {
+            // Ctrl-O: the inspect view (D2).
+            if let KeyInput::Shortcut { letter: 'o', ctrl: true, alt: false, .. } = key.input {
+                inspect.set(!inspect.get());
+                return true;
+            }
             // Ctrl-R and Alt-R dictate (D2).
             if let KeyInput::Shortcut { letter: 'r', ctrl, alt, .. } = key.input
                 && (ctrl || alt)
@@ -1081,6 +1107,63 @@ fn thinking(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, de
         cx.fold("thinking", header, move |cx| {
             cx.paragraph(body(), Tone::Dim);
         });
+    }
+}
+
+/// The record `at` in full, as the REPL's inspect mode shows it (AGL-066,
+/// D4): every part, the call's phases and their times.
+fn inspected(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize) {
+    let parts = record_at(chat, at, |record| -> Vec<(String, bool)> {
+        // Each part: its text, and whether it is a heading.
+        let mut parts = Vec::new();
+        match record {
+            Record::User(text) => parts.push((format!("\u{203a} {text}"), false)),
+            Record::Wake { flow, text } => parts.push((format!("wake {flow}: {text}"), false)),
+            Record::State(state) => parts.push((format!("[{state}]"), true)),
+            Record::Tool { call, result, phases, thinking, text, .. } => {
+                if let Some(thinking) = thinking {
+                    parts.push(("THINKING".into(), true));
+                    parts.push((thinking.clone(), false));
+                }
+                if let Some(text) = text.as_ref().filter(|text| !text.trim().is_empty()) {
+                    parts.push((text.clone(), false));
+                }
+                let (status, _) = records::status(result.as_ref().map(|result| result.outcome));
+                let times = records::phase_items(phases).join(" · ");
+                parts.push((format!("TOOL {} · {status} {times}", call.name), true));
+                parts.push((records::call_input(call), false));
+                if let Some(result) = result {
+                    parts.push(("RESULT".into(), true));
+                    parts.push((result.content.clone(), false));
+                }
+            }
+            Record::Answer { text, thinking, .. } => {
+                if let Some(thinking) = thinking {
+                    parts.push(("THINKING".into(), true));
+                    parts.push((thinking.clone(), false));
+                }
+                parts.push(("ANSWER".into(), true));
+                parts.push((text.clone(), false));
+            }
+            Record::Notice { line, detail, .. } => {
+                parts.push((line.clone(), true));
+                if let Some(detail) = detail {
+                    parts.push((detail.clone(), false));
+                }
+            }
+        }
+        parts
+    })
+    .unwrap_or_default();
+    for (text, heading) in parts {
+        if heading {
+            cx.label(text, Tone::Dim);
+        } else {
+            let node = cx.group(Sty::column(), move |cx| {
+                cx.paragraph(text.clone(), Tone::Normal);
+            });
+            cx.class(node, "markdown.code");
+        }
     }
 }
 
