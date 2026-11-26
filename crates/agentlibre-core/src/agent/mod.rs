@@ -254,6 +254,14 @@ impl Agent<'_> {
             &self.session.media_dir(),
             self.backend,
         )?;
+        // A medium that stands as text for want of a projector fails only
+        // the newest message, whose medium it is; an earlier one runs with
+        // the text (AGL-137, D1).
+        if expanded.unseen.is_some()
+            && expanded.unseen == messages.iter().rposition(|m| matches!(m, Message::User(_)))
+        {
+            return Err(BackendError::NoMultimodal.into());
+        }
         let tools = function_tools(function);
         // `Off` silences the thinking states (AGL-013, Q4): the level and
         // the state decide the thinking together.

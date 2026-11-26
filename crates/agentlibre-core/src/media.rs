@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::backend::error::Error as BackendError;
 use crate::backend::{Backend, Message};
 use crate::error;
 use agentlibre_forge::forge::sha256;
@@ -118,13 +119,42 @@ pub struct Expanded {
     /// How many of the markers stand for a picture (an image or a frame
     /// of a video); their tokens are bounded (D10).
     pub pictures: usize,
+    /// The index, in `messages`, of the last user message whose medium stood
+    /// as the text of a server with no projector; `None` when there is none
+    /// (AGL-137, D1).
+    pub unseen: Option<usize>,
+}
+
+/// What a medium stands as when the server has no projector (AGL-137, D1),
+/// as the `view` tool says it.
+const NO_PROJECTOR: &str = "the server has no multimodal projector, so it cannot take images";
+
+/// The server's media marker, asked once (AGL-137, D2): `Some` with a
+/// projector, `None` when it has none and a medium then stands as a text
+/// instead of failing (D1). Any other failure of `media_marker` fails.
+fn marker_of<'a>(
+    asked: &'a mut Option<Option<String>>,
+    backend: &dyn Backend,
+) -> Result<Option<&'a str>, error::Error> {
+    if asked.is_none() {
+        *asked = Some(match backend.media_marker() {
+            Ok(marker) => Some(marker),
+            Err(error) => match error {
+                error::Error::Backend(BackendError::NoMultimodal) => None,
+                error => return Err(error),
+            },
+        });
+    }
+    Ok(asked.as_ref().unwrap().as_deref())
 }
 
 /// Replaces the placeholders in the user messages and the tool results
 /// of `messages` with what the model reads (AGL-014): an image the
 /// server's marker; a video its frames, each after its time; an audio
 /// its transcript, or the marker when the model hears it (D19, D22). A
-/// placeholder the table does not know stays text.
+/// placeholder the table does not know stays text. A medium that needs
+/// the marker stands as a text when the server has no projector (AGL-137,
+/// D1), rather than failing; only the newest user message of a step fails.
 pub fn expand(
     messages: &mut [Message],
     table: &[&Media],
@@ -132,9 +162,10 @@ pub fn expand(
     backend: &dyn Backend,
 ) -> Result<Expanded, error::Error> {
     let mut expanded = Expanded::default();
-    let mut marker: Option<String> = None;
+    let mut marker: Option<Option<String>> = None;
     let mut hears: Option<bool> = None;
-    for message in messages {
+    for (at, message) in messages.iter_mut().enumerate() {
+        let user = matches!(message, Message::User(_));
         let text = match message {
             Message::User(text) => text,
             Message::Tool { content, .. } => content,
@@ -155,29 +186,39 @@ pub fn expand(
             };
             out.push_str(&text[last..item.start]);
             last = item.end;
-            let mut stand = |expanded: &mut Expanded, uploads: Vec<String>| -> Result<String, error::Error> {
-                if marker.is_none() {
-                    marker = Some(backend.media_marker()?);
-                }
-                expanded.uploads.extend(uploads);
-                Ok(marker.clone().unwrap_or_default())
-            };
             match medium.kind {
-                Kind::Image => {
-                    let bytes = read(dir, &medium.sha256, &medium.ext)?;
-                    out.push_str(&stand(&mut expanded, vec![base64(&bytes)])?);
-                    expanded.pictures += 1;
-                }
-                Kind::Video => {
-                    out.push_str(&format!("[Video#{}: frames", medium.number));
-                    for frame in &medium.frames {
-                        let bytes = read(dir, &frame.sha256, "jpg")?;
-                        let marker = stand(&mut expanded, vec![base64(&bytes)])?;
-                        out.push_str(&format!(" {} {marker}", clock(frame.at)));
+                Kind::Image => match marker_of(&mut marker, backend)? {
+                    Some(marker) => {
+                        let bytes = read(dir, &medium.sha256, &medium.ext)?;
+                        expanded.uploads.push(base64(&bytes));
                         expanded.pictures += 1;
+                        out.push_str(marker);
                     }
-                    out.push(']');
-                }
+                    None => {
+                        out.push_str(&format!("[Image#{}: {NO_PROJECTOR}]", medium.number));
+                        if user {
+                            expanded.unseen = Some(at);
+                        }
+                    }
+                },
+                Kind::Video => match marker_of(&mut marker, backend)? {
+                    Some(marker) => {
+                        out.push_str(&format!("[Video#{}: frames", medium.number));
+                        for frame in &medium.frames {
+                            let bytes = read(dir, &frame.sha256, "jpg")?;
+                            expanded.uploads.push(base64(&bytes));
+                            expanded.pictures += 1;
+                            out.push_str(&format!(" {} {marker}", clock(frame.at)));
+                        }
+                        out.push(']');
+                    }
+                    None => {
+                        out.push_str(&format!("[Video#{}: {NO_PROJECTOR}]", medium.number));
+                        if user {
+                            expanded.unseen = Some(at);
+                        }
+                    }
+                },
                 Kind::Audio => match &medium.transcript {
                     Some(transcript) => {
                         out.push_str(&format!("[Audio#{}: \"{transcript}\"]", medium.number));
@@ -186,11 +227,19 @@ pub fn expand(
                         if hears.is_none() {
                             hears = Some(backend.hears_audio()?);
                         }
-                        if hears == Some(true) {
-                            let bytes = read(dir, &medium.sha256, &medium.ext)?;
-                            out.push_str(&stand(&mut expanded, vec![base64(&bytes)])?);
-                        } else {
-                            out.push_str(&format!("[Audio#{}: not transcribed]", medium.number));
+                        match (hears == Some(true), marker_of(&mut marker, backend)?) {
+                            (true, Some(marker)) => {
+                                let bytes = read(dir, &medium.sha256, &medium.ext)?;
+                                expanded.uploads.push(base64(&bytes));
+                                out.push_str(marker);
+                            }
+                            (true, None) => {
+                                out.push_str(&format!("[Audio#{}: {NO_PROJECTOR}]", medium.number));
+                                if user {
+                                    expanded.unseen = Some(at);
+                                }
+                            }
+                            _ => out.push_str(&format!("[Audio#{}: not transcribed]", medium.number)),
                         }
                     }
                 },
