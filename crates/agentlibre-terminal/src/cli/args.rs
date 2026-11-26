@@ -1120,7 +1120,7 @@ mod tests {
         );
         assert_eq!(
             parse_strs(&["forge", "new", "task-spec", "--title", "t"]).unwrap(),
-            Command::Forge(ForgeAction::New { title: "t".into(), name: None })
+            Command::Forge(ForgeAction::New { type_name: "task-spec".into(), title: "t".into(), name: None, type_file: None })
         );
         // The help needs no settings (AGL-061, D1).
         for words in [&["forge"][..], &["forge", "-h"], &["forge", "--help"]] {
@@ -1252,7 +1252,7 @@ mod tests {
         );
         assert_eq!(
             parse_strs(&["forge", "new", "task-spec", "--title", "--help"]).unwrap(),
-            Command::Forge(ForgeAction::New { title: "--help".into(), name: None })
+            Command::Forge(ForgeAction::New { type_name: "task-spec".into(), title: "--help".into(), name: None, type_file: None })
         );
         assert_eq!(
             parse_strs(&["forge", "diff", "x", "--help"]).unwrap(),
@@ -1268,10 +1268,18 @@ mod tests {
             parse_strs(&["memory", "list", "x", "--help"]),
             Err(Error::UnknownOption(o)) if o == "x"
         ));
-        assert!(matches!(
-            parse_strs(&["forge", "new", "doc", "--help"]),
-            Err(Error::Core(crate::error::CoreError::Forge(crate::forge::error::Error::NewType { type_name }))) if type_name == "doc"
-        ));
+        // Which types there are is the descriptions' (AGL-124): any type
+        // word parses, and the `--help` after it is the help.
+        assert_eq!(parse_strs(&["forge", "new", "doc", "--help"]).unwrap(), Command::Help(HelpTopic::Forge));
+        assert_eq!(
+            parse_strs(&["forge", "new", "trial", "--title", "t", "--type-file", "/d/trial.nix"]).unwrap(),
+            Command::Forge(ForgeAction::New {
+                type_name: "trial".into(),
+                title: "t".into(),
+                name: None,
+                type_file: Some("/d/trial.nix".into())
+            })
+        );
     }
 
     #[test]

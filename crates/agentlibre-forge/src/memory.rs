@@ -11,7 +11,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::error;
-use crate::forge::task_spec::slug;
+use crate::forge::naming::slug;
 use agentlibre_common::file::write_atomic;
 use agentlibre_common::i18n::{Lang, Msg, m};
 use agentlibre_common::tr;

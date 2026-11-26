@@ -250,6 +250,9 @@ pub struct ForgeArgs {
     pub store: Option<String>,
     pub action: String,
     pub name: Option<String>,
+    /// For `new`: the kind of the artifact; `task-spec` when absent
+    /// (AGL-124, D17).
+    pub kind: Option<String>,
     pub title: Option<String>,
     pub old: Option<String>,
     pub new: Option<String>,
@@ -267,6 +270,7 @@ fn forge_args(call: &ToolCall) -> ForgeArgs {
         store: field("store"),
         action: call.text("action").unwrap_or_default().to_owned(),
         name: field("name"),
+        kind: field("type"),
         title: field("title"),
         old: field("old"),
         new: call.text("new").map(str::to_owned),
@@ -338,7 +342,7 @@ pub fn forge_run(
     match args.action.as_str() {
         "list" => (told(forge_list(ws), lang), None),
         "show" => (told(forge_show(ws, &args.name, lang, output), lang), None),
-        "new" => match forge_new(ws, &args.title, lang) {
+        "new" => match forge_new(ws, &args.kind, &args.title, lang) {
             // The name is the one the tool made, not an argument.
             Ok((content, name)) => (
                 done(content),
@@ -449,10 +453,10 @@ fn told(result: Result<String, Refusal>, lang: agentlibre_common::i18n::Lang) ->
 /// `forge list` (AGL-008): the store's artifacts, one line each — name,
 /// type, status, updated, deps; no git flags (they are the human's).
 fn forge_list(ws: &agentlibre_forge::forge::Workspace) -> Result<String, Refusal> {
-    use agentlibre_forge::forge::{self, Header};
+    use agentlibre_forge::forge::{self, Header, Kinds};
     let files = forge::artifact_files(&ws.dir)?;
     // One evaluation of all the front matters (AGL-041).
-    let headers = forge::read_headers(&files)?;
+    let headers = forge::read_headers(&files, &Kinds::of(&ws.dir))?;
     let mut lines = Vec::new();
     for (path, header) in files.iter().zip(headers) {
         let stem = path
@@ -466,7 +470,7 @@ fn forge_list(ws: &agentlibre_forge::forge::Workspace) -> Result<String, Refusal
                 artifact.type_name,
                 artifact.status,
                 artifact.updated,
-                artifact.deps.join(", ")
+                artifact.strings("deps").join(", ")
             ),
             Header::UnknownSchema { schema } => format!("{stem} !schema {schema}"),
             Header::Broken { detail } => format!("{stem} !parse {detail}"),
@@ -487,35 +491,64 @@ fn forge_show(
     lang: agentlibre_common::i18n::Lang,
     output: &Output<'_>,
 ) -> Result<String, Refusal> {
-    use agentlibre_forge::forge;
+    use agentlibre_forge::forge::{self, Kinds};
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "show", "name"))?;
-    let artifact = forge::find_artifact(ws, name)?;
+    let artifact = forge::find_artifact(ws, &Kinds::of(&ws.dir), name)?;
     let text = forge::render(&artifact);
     Ok(output::limited(&text, output.tokens, &artifact.path, output.count))
 }
 
-/// `forge new` (AGL-008): the scaffold of a new task-spec, the same
-/// engine path as the CLI's `forge new`; its name is the one the tool made.
+/// `forge new` (AGL-008): the scaffold of a new artifact of `kind`,
+/// `task-spec` when absent (AGL-124, D17), the same engine path as the
+/// CLI's `forge new`; its name is the one the tool made.
 fn forge_new(
     ws: &agentlibre_forge::forge::Workspace,
+    kind: &Option<String>,
     title: &Option<String>,
     lang: agentlibre_common::i18n::Lang,
 ) -> Result<(String, String), Refusal> {
     use agentlibre_common::i18n::m;
     use agentlibre_common::tr;
+    use agentlibre_forge::forge::Kinds;
     let title = title.as_deref().ok_or_else(|| missing_field(lang, "new", "title"))?;
+    let kinds = Kinds::of(&ws.dir);
+    let kind = kinds.get(kind.as_deref().unwrap_or("task-spec"))?;
     // The marker line of a store materialized by the write is not tool
     // output.
-    let created = agentlibre_forge::forge::new_task_spec(ws, lang, title, None)?;
+    let created = agentlibre_forge::forge::new_artifact(ws, &kinds, kind, lang, title, None)?;
     let content = tr!(lang, m::FORGE_NEW_CREATED, path = created.path.display()).to_owned();
     Ok((content, created.name))
 }
 
+/// The refusal of `action` on `artifact` in a status its kind does not
+/// allow it in (AGL-124, D13).
+fn not_allowed(
+    lang: agentlibre_common::i18n::Lang,
+    artifact: &agentlibre_forge::forge::Artifact,
+    kind: &agentlibre_forge::forge::Kind,
+    action: &str,
+) -> Option<Refusal> {
+    use agentlibre_common::i18n::m;
+    use agentlibre_common::tr;
+    let allowed = kind.allowed(action);
+    if allowed.contains(&artifact.status) {
+        return None;
+    }
+    Some(match allowed {
+        [] => tr!(lang, m::FORGE_TOOL_NEVER_ALLOWED, action = action, type_name = kind.name.as_str()).into(),
+        [one] => tr!(lang, m::FORGE_TOOL_NOT_ALLOWED, name = artifact.name.as_str(), status = artifact.status.as_str(), action = action, statuses = one.as_str()).into(),
+        [first @ .., last] => {
+            let statuses = format!("{} {} {last}", first.join(", "), tr!(lang, m::OR));
+            tr!(lang, m::FORGE_TOOL_NOT_ALLOWED, name = artifact.name.as_str(), status = artifact.status.as_str(), action = action, statuses = statuses).into()
+        }
+    })
+}
+
 /// `forge edit` (AGL-008): replaces one occurrence in the body, the
-/// workspace `edit`'s semantics; allowed in the alive states (`open`,
-/// `in-progress`, `backlog`) for any section except `## Progress`,
-/// which stays append-only through `append` (D4, AGL-032); `updated`
-/// is bumped and the file is re-rendered from the parsed form.
+/// workspace `edit`'s semantics; allowed in the statuses the kind's
+/// `actions.edit` lists, for any section but the append-only ones, which
+/// grow through `append` (AGL-124, D13); `updated` is bumped and the file
+/// is re-rendered from the parsed form.
 fn forge_edit(
     ws: &agentlibre_forge::forge::Workspace,
     name: &Option<String>,
@@ -523,7 +556,6 @@ fn forge_edit(
     new: &Option<String>,
     lang: agentlibre_common::i18n::Lang,
 ) -> Result<String, Refusal> {
-    use agentlibre_forge::forge::task_spec::Status;
     use agentlibre_forge::forge;
     use agentlibre_common::i18n::m;
     use agentlibre_common::tr;
@@ -534,31 +566,26 @@ fn forge_edit(
         .filter(|old| !old.is_empty())
         .ok_or_else(|| missing_field(lang, "edit", "old"))?;
     let new = new.as_deref().ok_or_else(|| missing_field(lang, "edit", "new"))?;
-    let (mut artifact, status) = task_spec_of(ws, name, "edit", lang)?;
-    // The closed records stay (D4, AGL-032); the alive states take the
-    // edit.
-    if matches!(status, Status::Done | Status::Canceled) {
-        return Err(tr!(
-            lang,
-            m::FORGE_TOOL_EDIT_CLOSED,
-            name = name,
-            status = status.name()
-        )
-        .into());
+    let kinds = forge::Kinds::of(&ws.dir);
+    let mut artifact = forge::find_artifact(ws, &kinds, name)?;
+    let kind = kinds.get(&artifact.type_name)?;
+    if let Some(refusal) = not_allowed(lang, &artifact, kind, "edit") {
+        return Err(refusal);
     }
     let body = &artifact.body;
     let starts = agentlibre_forge::replace::occurrences(body, old);
     match starts.as_slice() {
         [] => Err(format!("`old` was not found in {name}.").into()),
         [start] => {
-            // The `## Progress` section stays append-only (D4, AGL-032):
-            // a unique `old` that touches it is refused, in any alive
-            // state.
-            if let Some((p_start, p_end)) = progress_range(body)
-                && *start < p_end
-                && *start + old.len() > p_start
-            {
-                return Err(tr!(lang, m::FORGE_TOOL_EDIT_PROGRESS, name = name).into());
+            // An append-only section stays so (D13): a unique `old` that
+            // touches it is refused, in any status.
+            for heading in kind.append_only() {
+                if let Some((from, to)) = section_range(body, heading)
+                    && *start < to
+                    && *start + old.len() > from
+                {
+                    return Err(tr!(lang, m::FORGE_TOOL_EDIT_APPEND_ONLY, name = name, section = heading).into());
+                }
             }
             let mut edited = String::with_capacity(body.len() + new.len());
             edited.push_str(&body[..*start]);
@@ -588,17 +615,16 @@ fn forge_edit(
     }
 }
 
-/// The range of the `## Progress` section of a task-spec body (D4,
-/// AGL-032): from the start of the heading line to the next `## `
-/// heading line or the end of the body; `None` when the section is
-/// absent.
-fn progress_range(body: &str) -> Option<(usize, usize)> {
-    const MARKER: &str = "## Progress";
+/// The range of the `## <heading>` section of a body: from the start of
+/// the heading line to the next `## ` heading line or the end of the
+/// body; `None` when the section is absent.
+fn section_range(body: &str, heading: &str) -> Option<(usize, usize)> {
+    let marker = format!("## {heading}");
     let mut from = 0;
-    while let Some(rel) = body[from..].find(MARKER) {
+    while let Some(rel) = body[from..].find(&marker) {
         let at = from + rel;
         let starts_line = at == 0 || body.as_bytes()[at - 1] == b'\n';
-        let after = at + MARKER.len();
+        let after = at + marker.len();
         if starts_line && body[after..].starts_with('\n') {
             let rest = &body[after + 1..];
             let end = rest
@@ -614,8 +640,8 @@ fn progress_range(body: &str) -> Option<(usize, usize)> {
 
 /// `forge append` (AGL-008): appends `text` as a bullet at the end of
 /// the `## section` of the body (newest last); the section must exist;
-/// allowed while `open` or `in-progress` (D4, AGL-032); `updated` is
-/// bumped.
+/// allowed in the statuses the kind's `actions.append` lists (AGL-124,
+/// D13); `updated` is bumped.
 fn forge_append(
     ws: &agentlibre_forge::forge::Workspace,
     name: &Option<String>,
@@ -623,7 +649,6 @@ fn forge_append(
     text: &Option<String>,
     lang: agentlibre_common::i18n::Lang,
 ) -> Result<String, Refusal> {
-    use agentlibre_forge::forge::task_spec::Status;
     use agentlibre_forge::forge;
     use agentlibre_common::i18n::m;
     use agentlibre_common::tr;
@@ -632,17 +657,11 @@ fn forge_append(
         .as_deref()
         .ok_or_else(|| missing_field(lang, "append", "section"))?;
     let text = text.as_deref().ok_or_else(|| missing_field(lang, "append", "text"))?;
-    let (mut artifact, status) = task_spec_of(ws, name, "append", lang)?;
-    // The working states take the bullet (D4, AGL-032); `backlog` and
-    // the closed records refuse.
-    if !matches!(status, Status::Open | Status::InProgress) {
-        return Err(tr!(
-            lang,
-            m::FORGE_TOOL_APPEND_NOT_ACTIVE,
-            name = name,
-            status = status.name()
-        )
-        .into());
+    let kinds = forge::Kinds::of(&ws.dir);
+    let mut artifact = forge::find_artifact(ws, &kinds, name)?;
+    let kind = kinds.get(&artifact.type_name)?;
+    if let Some(refusal) = not_allowed(lang, &artifact, kind, "append") {
+        return Err(refusal);
     }
     // A bullet is one line (AGL-031): a multi-line text would fail the
     // append-only check below, so name the rule and the count up front.
@@ -684,11 +703,11 @@ fn forge_append(
     Ok(format!("appended a bullet to ## {section} in {name}"))
 }
 
-/// `forge status` (AGL-023): moves the task-spec through the lifecycle,
-/// the CLI's `forge status` in the tool's shape: the same transition
-/// validation, the same `updated` bump; task-specs only. The refusal
-/// from a terminal state (`done`, `canceled`) points to the new-spec
-/// convention with a `supersedes` link (D3, AGL-032).
+/// `forge status` (AGL-023): moves the artifact through its kind's
+/// lifecycle, the CLI's `forge status` in the tool's shape: the same
+/// transition validation, the same `updated` bump. The refusal from a
+/// terminal state points to a new artifact with a `supersedes` link (D3,
+/// AGL-032).
 fn forge_status(
     ws: &agentlibre_forge::forge::Workspace,
     name: &Option<String>,
@@ -699,12 +718,8 @@ fn forge_status(
     use agentlibre_common::tr;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "status", "name"))?;
     let state = state.as_deref().ok_or_else(|| missing_field(lang, "status", "state"))?;
-    let changed = agentlibre_forge::forge::change_status(ws, name, state).map_err(|error| match error {
-        agentlibre_forge::Error::Forge(agentlibre_forge::forge::error::Error::NotTaskSpec { name, type_name }) => {
-            not_task_spec(lang, &name, type_name, "status")
-        }
-        error => error.into(),
-    })?;
+    let kinds = agentlibre_forge::forge::Kinds::of(&ws.dir);
+    let changed = agentlibre_forge::forge::change_status(ws, &kinds, name, state)?;
     Ok(tr!(
         lang,
         m::FORGE_STATUS_CHANGED,
@@ -715,27 +730,20 @@ fn forge_status(
     .to_owned())
 }
 
-/// `forge remove` (AGL-008): deletes the artifact file; allowed for
-/// `open`, `canceled`, `backlog` (D5, AGL-032); `in-progress` refuses,
-/// pointing to `status canceled` first; `done` refuses — a historical
-/// fact.
+/// `forge remove` (AGL-008): deletes the artifact file; allowed in the
+/// statuses the kind's `actions.remove` lists (AGL-124, D13).
 fn forge_remove(
     ws: &agentlibre_forge::forge::Workspace,
     name: &Option<String>,
     lang: agentlibre_common::i18n::Lang,
 ) -> Result<String, Refusal> {
-    use agentlibre_forge::forge::task_spec::Status;
-    use agentlibre_common::i18n::m;
-    use agentlibre_common::tr;
+    use agentlibre_forge::forge;
     let name = name.as_deref().ok_or_else(|| missing_field(lang, "remove", "name"))?;
-    let (artifact, status) = task_spec_of(ws, name, "remove", lang)?;
-    // D5, AGL-032: the live work is protected — an in-progress spec is
-    // canceled first, then removed; a done spec is a historical fact.
-    if status == Status::InProgress {
-        return Err(tr!(lang, m::FORGE_TOOL_REMOVE_IN_PROGRESS, name = name).into());
-    }
-    if status == Status::Done {
-        return Err(tr!(lang, m::FORGE_TOOL_REMOVE_DONE, name = name).into());
+    let kinds = forge::Kinds::of(&ws.dir);
+    let artifact = forge::find_artifact(ws, &kinds, name)?;
+    let kind = kinds.get(&artifact.type_name)?;
+    if let Some(refusal) = not_allowed(lang, &artifact, kind, "remove") {
+        return Err(refusal);
     }
     fs::remove_file(&artifact.path).map_err(|source| crate::error::Error::from(agentlibre_forge::forge::error::Error::Remove {
         path: artifact.path.clone(),
@@ -756,11 +764,12 @@ fn rename_valid_name(name: &str) -> bool {
 }
 
 /// `forge rename` (D6, AGL-032): renames the artifact's file and its
-/// front-matter name and rewrites every `deps` and `supersedes`
-/// reference in the store, in any status — identity maintenance, not a
-/// lifecycle change. The new file is written, the references rewritten,
-/// and only then the old file removed, so a failure never leaves a
-/// dangling reference. The success reports the new name for the event.
+/// front-matter name and rewrites every reference to it in the store —
+/// the `ref` and `refs` fields of each artifact's kind (AGL-124, D8) — in
+/// any status: identity maintenance, not a lifecycle change. The new file
+/// is written, the references rewritten, and only then the old file
+/// removed, so a failure never leaves a dangling reference. The success
+/// reports the new name for the event.
 fn forge_rename(
     ws: &agentlibre_forge::forge::Workspace,
     name: &Option<String>,
@@ -783,10 +792,13 @@ fn forge_rename(
     if new == name {
         return Err(tr!(lang, m::FORGE_TOOL_RENAME_SAME_NAME, name = name, new = new).into());
     }
-    let artifact = forge::find_artifact(ws, name)?;
+    let kinds = forge::Kinds::of(&ws.dir);
+    let artifact = forge::find_artifact(ws, &kinds, name)?;
+    // A type with no description is shown, not written (D18).
+    kinds.get(&artifact.type_name)?;
     // The name is the front-matter field; a stray file with the new
     // stem in its type directory would be clobbered by the write.
-    let taken = forge::store_names(ws)?;
+    let taken = forge::store_names(ws, &kinds)?;
     let new_path = artifact.path.with_file_name(format!("{new}.md"));
     if taken.iter().any(|taken| taken == new) || new_path.exists() {
         return Err(Error::from(agentlibre_forge::forge::error::Error::NameTaken {
@@ -806,16 +818,29 @@ fn forge_rename(
         if path == artifact.path {
             continue;
         }
-        let Ok(mut other) = forge::load_artifact(&path) else {
+        let Ok(mut other) = forge::load_artifact(&path, &kinds) else {
             continue;
         };
+        let Ok(kind) = kinds.get(&other.type_name) else {
+            continue;
+        };
+        let fields: Vec<String> = kind.ref_fields().map(|(field, _)| field.to_owned()).collect();
         let mut changed = false;
-        for list in [&mut other.deps, &mut other.supersedes] {
-            for item in list.iter_mut() {
-                if item == name {
+        for field in fields {
+            match other.fields.get_mut(&field) {
+                Some(serde_json::Value::String(item)) if item == name => {
                     *item = new.to_owned();
                     changed = true;
                 }
+                Some(serde_json::Value::Array(items)) => {
+                    for item in items.iter_mut() {
+                        if item.as_str() == Some(name) {
+                            *item = serde_json::Value::String(new.to_owned());
+                            changed = true;
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         if changed {
@@ -830,44 +855,6 @@ fn forge_rename(
     Ok((format!("renamed {name} to {new}"), new.to_owned()))
 }
 
-/// The forge tool's refusal of a write on a non-`task-spec` artifact
-/// (AGL-008): the writes apply to the `task-spec` type only.
-fn not_task_spec(
-    lang: agentlibre_common::i18n::Lang,
-    name: &str,
-    type_name: String,
-    action: &str,
-) -> Refusal {
-    use agentlibre_common::i18n::m;
-    use agentlibre_common::tr;
-    tr!(
-        lang,
-        m::FORGE_TOOL_NOT_TASK_SPEC,
-        name = name,
-        type_name = type_name,
-        action = action
-    )
-    .into()
-}
-
-/// The task-spec `name` of the store with its status, for a write of
-/// `action`; the writes apply to the `task-spec` type only.
-fn task_spec_of(
-    ws: &agentlibre_forge::forge::Workspace,
-    name: &str,
-    action: &str,
-    lang: agentlibre_common::i18n::Lang,
-) -> Result<(agentlibre_forge::forge::Artifact, agentlibre_forge::forge::task_spec::Status), Refusal> {
-    use agentlibre_forge::forge::task_spec::{self, Status};
-    let artifact = agentlibre_forge::forge::find_artifact(ws, name)?;
-    if artifact.type_name != task_spec::TYPE {
-        return Err(not_task_spec(lang, name, artifact.type_name, action));
-    }
-    let status =
-        Status::parse(&artifact.status).expect("a parsed task-spec carries a valid status");
-    Ok((artifact, status))
-}
-
 /// The forge tool's `missing field` refusal.
 fn missing_field(lang: agentlibre_common::i18n::Lang, action: &str, field: &str) -> Refusal {
     use agentlibre_common::i18n::m;
@@ -875,7 +862,7 @@ fn missing_field(lang: agentlibre_common::i18n::Lang, action: &str, field: &str)
     // The fields the action takes: the model that sent a wrong one
     // learns the right ones.
     let fields = match action {
-        "new" => "title",
+        "new" => "title, type",
         "edit" => "name, old, new",
         "append" => "name, section, text",
         "status" => "name, state",

@@ -41,8 +41,6 @@ pub enum Error {
     ArtifactFrontMatter { path: PathBuf },
     /// An artifact file carries a schema the forge does not parse.
     ArtifactUnknownSchema { path: PathBuf, schema: String },
-    /// The set of the type of an artifact is missing.
-    ArtifactTypeTableMissing { path: PathBuf, type_name: String },
     /// An artifact front-matter key outside the envelope.
     ArtifactKey { path: PathBuf, key: String },
     /// An artifact date is not a `YYYY-MM-DD` calendar date.
@@ -50,7 +48,7 @@ pub enum Error {
     /// No artifact is named `name` in the store.
     ArtifactNotFound { name: String, dir: PathBuf },
     /// `forge status` asks for a state outside the lifecycle.
-    BadState { state: String },
+    BadState { state: String, type_name: String, statuses: Vec<String> },
     /// `forge status` asks for a transition the lifecycle does not
     /// allow.
     BadTransition { from: String, to: String },
@@ -58,12 +56,17 @@ pub enum Error {
     /// AGL-032): the refusal points to the new-spec convention with a
     /// `supersedes` link.
     TerminalState { name: String, from: String },
-    /// `forge new` names a type it does not scaffold.
-    NewType { type_name: String },
     /// `forge new` names an artifact that is already in the store.
     NameTaken { name: String, dir: PathBuf },
-    /// `forge status` on an artifact that is not a `task-spec`.
-    NotTaskSpec { name: String, type_name: String },
+    /// No description of the kind `type_name` is found (AGL-124, D11, D18).
+    UnknownKind { type_name: String },
+    /// The description of a kind is wrong (AGL-124, D18).
+    KindDescription { path: PathBuf, fault: KindFault },
+    /// A field of kind `choice` holds a value outside its set (AGL-124, D8).
+    FieldChoice { path: PathBuf, key: String, value: String, choices: Vec<String> },
+    /// `forge range` on a kind whose description has no `range` field
+    /// (AGL-124, D16).
+    NoRange { name: String, type_name: String },
     /// `forge rehome` while the identity is already in a store: putting
     /// it in a second one is the two-markers trap.
     RehomeInUse { current: String, target: String },
@@ -126,14 +129,18 @@ impl Error {
             Self::ArtifactUnknownSchema { path, schema } => {
                 tr!(lang, ARTIFACT_UNKNOWN_SCHEMA, path = path.display(), schema = schema)
             }
-            Self::ArtifactTypeTableMissing { path, type_name } => {
-                tr!(
-                    lang,
-                    ARTIFACT_TYPE_TABLE_MISSING,
-                    path = path.display(),
-                    type_name = type_name
-                )
+            Self::UnknownKind { type_name } => tr!(lang, UNKNOWN_KIND, type_name = type_name),
+            Self::KindDescription { path, fault } => {
+                tr!(lang, KIND_DESCRIPTION, path = path.display(), fault = fault.message(lang))
             }
+            Self::FieldChoice { path, key, value, choices } => tr!(
+                lang,
+                FIELD_CHOICE,
+                path = path.display(),
+                key = key,
+                value = value,
+                choices = choices.join(", ")
+            ),
             Self::ArtifactKey { path, key } => {
                 tr!(lang, ARTIFACT_KEY, path = path.display(), key = key)
             }
@@ -154,19 +161,20 @@ impl Error {
                     dir = dir.display()
                 )
             }
-            Self::BadState { state } => tr!(lang, BAD_STATE, state = state),
+            Self::BadState { state, type_name, statuses } => {
+                tr!(lang, BAD_STATE, state = state, type_name = type_name, statuses = statuses.join(", "))
+            }
             Self::BadTransition { from, to } => {
                 tr!(lang, BAD_TRANSITION, from = from, to = to)
             }
             Self::TerminalState { name, from } => {
                 tr!(lang, TERMINAL_STATE, name = name, from = from)
             }
-            Self::NewType { type_name } => tr!(lang, NEW_TYPE, type_name = type_name),
             Self::NameTaken { name, dir } => {
                 tr!(lang, NAME_TAKEN, name = name, dir = dir.display())
             }
-            Self::NotTaskSpec { name, type_name } => {
-                tr!(lang, NOT_TASK_SPEC, name = name, type_name = type_name)
+            Self::NoRange { name, type_name } => {
+                tr!(lang, NO_RANGE, name = name, type_name = type_name)
             }
             Self::RehomeInUse { current, target } => {
                 tr!(lang, REHOME_IN_USE, current = current, target = target)
@@ -206,10 +214,22 @@ const ARTIFACT_NOT_FOUND: Msg = Msg {
     uk: "артефакту на ім'я {name} немає в {dir}",
 };
 
-/// `Error::ArtifactTypeTableMissing`.
-const ARTIFACT_TYPE_TABLE_MISSING: Msg = Msg {
-    en: "{path} has no [{type_name}] table",
-    uk: "у {path} немає таблиці [{type_name}]",
+/// `Error::UnknownKind`.
+const UNKNOWN_KIND: Msg = Msg {
+    en: "no description of the kind {type_name} is found: forge-types/{type_name}.nix is in none of the store, the user's config or agl's",
+    uk: "опису виду {type_name} не знайдено: forge-types/{type_name}.nix немає ні в сховищі, ні в конфігурації користувача, ні в agl",
+};
+
+/// `Error::KindDescription`.
+const KIND_DESCRIPTION: Msg = Msg {
+    en: "the description {path} is wrong: {fault}",
+    uk: "опис {path} хибний: {fault}",
+};
+
+/// `Error::FieldChoice`.
+const FIELD_CHOICE: Msg = Msg {
+    en: "`{key}` in {path} is {value}; it must be one of: {choices}",
+    uk: "`{key}` у {path} — {value}; має бути одним із: {choices}",
 };
 
 /// `Error::ArtifactUnknownSchema`.
@@ -220,8 +240,8 @@ const ARTIFACT_UNKNOWN_SCHEMA: Msg = Msg {
 
 /// `Error::BadState`.
 const BAD_STATE: Msg = Msg {
-    en: "{state} is not a task-spec state (open, in-progress, done, backlog, canceled)",
-    uk: "{state} не є станом task-spec (open, in-progress, done, backlog, canceled)",
+    en: "{state} is not a {type_name} state ({statuses})",
+    uk: "{state} не є станом {type_name} ({statuses})",
 };
 
 /// `Error::BadTransition`.
@@ -278,11 +298,6 @@ const NAME_TAKEN: Msg = Msg {
     uk: "артефакт на ім'я {name} вже є в {dir}",
 };
 
-/// `Error::NewType`.
-const NEW_TYPE: Msg = Msg {
-    en: "forge new does not scaffold {type_name}",
-    uk: "forge new не створює {type_name}",
-};
 
 /// `Error::NotInRepository`.
 const NOT_IN_REPOSITORY: Msg = Msg {
@@ -290,10 +305,10 @@ const NOT_IN_REPOSITORY: Msg = Msg {
     uk: "{cwd} не є git-репозиторієм; forge працює з робочою областю поточної теки",
 };
 
-/// `Error::NotTaskSpec`.
-const NOT_TASK_SPEC: Msg = Msg {
-    en: "{name} is a {type_name}, not a task-spec; status applies to task-specs only",
-    uk: "{name} — це {type_name}, а не task-spec; status стосується лише task-spec",
+/// `Error::NoRange`.
+const NO_RANGE: Msg = Msg {
+    en: "{name} is a {type_name}, whose description has no range field; range applies to the kinds that have one",
+    uk: "{name} — це {type_name}, опис якого не має поля range; range стосується видів, що його мають",
 };
 
 /// `Error::RehomeInUse`.
@@ -337,4 +352,152 @@ const TERMINAL_STATE: Msg = Msg {
 const WORKSPACE_AMBIGUOUS: Msg = Msg {
     en: "the workspace identity is in the markers of {dirs}; a store was copied by hand, remove the copy",
     uk: "ідентифікатор робочої області є в маркерах {dirs}; сховище скопійовано вручну, прибери копію",
+};
+
+/// What is wrong in the description of a kind (AGL-124, D18).
+#[derive(Debug)]
+pub enum KindFault {
+    /// The file does not evaluate to an attribute set (D22).
+    NotASet,
+    /// `statuses` is empty.
+    NoStatuses,
+    /// A status is listed twice.
+    DuplicateStatus { status: String },
+    /// `key` names a status that is not in `statuses`.
+    UnknownStatus { key: String, status: String },
+    /// A field's `kind` is none of the twelve (D8).
+    FieldKind { field: String, kind: String },
+    /// A field of kind `choice` lists no `choices`.
+    NoChoices { field: String },
+    /// A `list` field's `of` is not a plain kind.
+    ListOf { field: String, of: String },
+    /// A field carries `choices` or `of` that its kind does not take.
+    Stray { field: String, key: String },
+    /// A field's `default` is not of its kind.
+    Default { field: String, kind: String },
+    /// A field's name is empty in a part, or one of the envelope's (D7).
+    FieldName { field: String },
+    /// A field's name is the set of another field.
+    FieldNested { field: String, inner: String },
+    /// Two fields of kind `range` (D16).
+    TwoRanges { first: String, second: String },
+    /// A section heading is empty or more than a line.
+    Heading { heading: String },
+    /// A section heading is listed twice.
+    DuplicateHeading { heading: String },
+    /// `prefix` is not a run of letters (D15).
+    Prefix { prefix: String },
+}
+
+impl KindFault {
+    /// The message of `self` in `lang`.
+    pub fn message(&self, lang: Lang) -> String {
+        match self {
+            Self::NotASet => tr!(lang, FAULT_NOT_A_SET).to_string(),
+            Self::NoStatuses => tr!(lang, FAULT_NO_STATUSES).to_string(),
+            Self::DuplicateStatus { status } => tr!(lang, FAULT_DUPLICATE_STATUS, status = status),
+            Self::UnknownStatus { key, status } => tr!(lang, FAULT_UNKNOWN_STATUS, key = key, status = status),
+            Self::FieldKind { field, kind } => tr!(lang, FAULT_FIELD_KIND, field = field, kind = kind),
+            Self::NoChoices { field } => tr!(lang, FAULT_NO_CHOICES, field = field),
+            Self::ListOf { field, of } => tr!(lang, FAULT_LIST_OF, field = field, of = of),
+            Self::Stray { field, key } => tr!(lang, FAULT_STRAY, field = field, key = key),
+            Self::Default { field, kind } => tr!(lang, FAULT_DEFAULT, field = field, kind = kind),
+            Self::FieldName { field } => tr!(lang, FAULT_FIELD_NAME, field = field),
+            Self::FieldNested { field, inner } => tr!(lang, FAULT_FIELD_NESTED, field = field, inner = inner),
+            Self::TwoRanges { first, second } => tr!(lang, FAULT_TWO_RANGES, first = first, second = second),
+            Self::Heading { heading } => tr!(lang, FAULT_HEADING, heading = heading),
+            Self::DuplicateHeading { heading } => tr!(lang, FAULT_DUPLICATE_HEADING, heading = heading),
+            Self::Prefix { prefix } => tr!(lang, FAULT_PREFIX, prefix = prefix),
+        }
+    }
+}
+
+/// `KindFault::NotASet`.
+const FAULT_NOT_A_SET: Msg = Msg {
+    en: "it is not an attribute set",
+    uk: "це не набір атрибутів",
+};
+
+/// `KindFault::NoStatuses`.
+const FAULT_NO_STATUSES: Msg = Msg {
+    en: "`statuses` is empty",
+    uk: "`statuses` порожній",
+};
+
+/// `KindFault::DuplicateStatus`.
+const FAULT_DUPLICATE_STATUS: Msg = Msg {
+    en: "the status {status} is listed twice in `statuses`",
+    uk: "статус {status} двічі в `statuses`",
+};
+
+/// `KindFault::UnknownStatus`.
+const FAULT_UNKNOWN_STATUS: Msg = Msg {
+    en: "`{key}` names {status}, which is not in `statuses`",
+    uk: "`{key}` називає {status}, якого немає в `statuses`",
+};
+
+/// `KindFault::FieldKind`.
+const FAULT_FIELD_KIND: Msg = Msg {
+    en: "the field {field} is of the kind {kind}; the kinds are string, text, number, bool, date, choice, list, ref, refs, commit, range and cmds",
+    uk: "поле {field} має вид {kind}; види: string, text, number, bool, date, choice, list, ref, refs, commit, range і cmds",
+};
+
+/// `KindFault::NoChoices`.
+const FAULT_NO_CHOICES: Msg = Msg {
+    en: "the field {field} is a choice with no `choices`",
+    uk: "поле {field} — choice без `choices`",
+};
+
+/// `KindFault::ListOf`.
+const FAULT_LIST_OF: Msg = Msg {
+    en: "the list {field} is of `{of}`; `of` is string, text, number, bool, date, choice, ref or commit",
+    uk: "список {field} має `of` = `{of}`; `of` — string, text, number, bool, date, choice, ref або commit",
+};
+
+/// `KindFault::Stray`.
+const FAULT_STRAY: Msg = Msg {
+    en: "the field {field} has `{key}`, which its kind does not take",
+    uk: "поле {field} має `{key}`, якого його вид не бере",
+};
+
+/// `KindFault::Default`.
+const FAULT_DEFAULT: Msg = Msg {
+    en: "the default of the field {field} is not a {kind}",
+    uk: "типове значення поля {field} — не {kind}",
+};
+
+/// `KindFault::FieldName`.
+const FAULT_FIELD_NAME: Msg = Msg {
+    en: "the field name {field} is empty in a part or one of the envelope's (schema, type, name, status, created, updated)",
+    uk: "ім'я поля {field} має порожню частину або належить конверту (schema, type, name, status, created, updated)",
+};
+
+/// `KindFault::FieldNested`.
+const FAULT_FIELD_NESTED: Msg = Msg {
+    en: "the field {field} is the set of the field {inner}",
+    uk: "поле {field} є набором поля {inner}",
+};
+
+/// `KindFault::TwoRanges`.
+const FAULT_TWO_RANGES: Msg = Msg {
+    en: "two fields are of the kind range, {first} and {second}; a kind has one at most",
+    uk: "два поля мають вид range, {first} і {second}; у виду їх щонайбільше одне",
+};
+
+/// `KindFault::Heading`.
+const FAULT_HEADING: Msg = Msg {
+    en: "the section heading `{heading}` is empty or more than a line",
+    uk: "заголовок секції `{heading}` порожній або довший за рядок",
+};
+
+/// `KindFault::DuplicateHeading`.
+const FAULT_DUPLICATE_HEADING: Msg = Msg {
+    en: "the section {heading} is listed twice in `body`",
+    uk: "секція {heading} двічі в `body`",
+};
+
+/// `KindFault::Prefix`.
+const FAULT_PREFIX: Msg = Msg {
+    en: "the prefix `{prefix}` is not a run of letters",
+    uk: "префікс `{prefix}` — не послідовність літер",
 };

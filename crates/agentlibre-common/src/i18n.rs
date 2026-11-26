@@ -2027,45 +2027,31 @@ Forge (сховище артефактів робочої області, agentL
         uk: "forge {action}: не вказано {field}; {action} приймає {fields}",
     };
 
-    /// The forge tool: the write is not on a `task-spec`.
-    pub const FORGE_TOOL_NOT_TASK_SPEC: Msg = Msg {
-        en: "{name} is a {type_name}, not a task-spec; {action} applies to task-specs only",
-        uk: "{name} — це {type_name}, а не task-spec; {action} стосується лише task-spec",
+    /// The forge tool: an action in a status its kind does not allow it
+    /// in (AGL-124, D13); `statuses` are the ones it does.
+    pub const FORGE_TOOL_NOT_ALLOWED: Msg = Msg {
+        en: "{name} is {status}; {action} is allowed while {statuses}",
+        uk: "{name} — {status}; {action} дозволено, поки {statuses}",
     };
 
-    /// The forge tool: `edit` on a closed record (D4, AGL-032): the
-    /// alive states (`open`, `in-progress`, `backlog`) take the edit.
-    pub const FORGE_TOOL_EDIT_CLOSED: Msg = Msg {
-        en: "{name} is {status}; edit is allowed while open, in-progress or backlog",
-        uk: "{name} — {status}; edit дозволено, поки open, in-progress або backlog",
+    /// The forge tool: an action its kind allows in no status (AGL-124,
+    /// D13).
+    pub const FORGE_TOOL_NEVER_ALLOWED: Msg = Msg {
+        en: "{action} is allowed in no status of a {type_name}",
+        uk: "{action} не дозволено в жодному статусі {type_name}",
     };
 
-    /// The forge tool: `edit` touches the append-only `## Progress`
-    /// section (D4, AGL-032).
-    pub const FORGE_TOOL_EDIT_PROGRESS: Msg = Msg {
-        en: "the `## Progress` section of {name} is append-only; use the append action",
-        uk: "секція `## Progress` у {name} — append-only; скористайтеся append",
+    /// The forge tool: `edit` touches an append-only section (D4,
+    /// AGL-032; AGL-124, D13).
+    pub const FORGE_TOOL_EDIT_APPEND_ONLY: Msg = Msg {
+        en: "the `## {section}` section of {name} is append-only; use the append action",
+        uk: "секція `## {section}` у {name} — append-only; скористайтеся append",
     };
 
-    /// The forge tool: `append` outside the working states (`open`,
-    /// `in-progress`) (D4, AGL-032).
-    pub const FORGE_TOOL_APPEND_NOT_ACTIVE: Msg = Msg {
-        en: "{name} is {status}; append is allowed while open or in-progress",
-        uk: "{name} — {status}; append дозволено, поки open або in-progress",
-    };
-
-    /// The forge tool: `remove` on an `in-progress` spec (D5, AGL-032):
-    /// the path is `status canceled` first, then remove.
-    pub const FORGE_TOOL_REMOVE_IN_PROGRESS: Msg = Msg {
-        en: "{name} is in-progress; cancel it first (`status canceled`), then remove",
-        uk: "{name} — in-progress; спочатку скасуйте (`status canceled`), потім remove",
-    };
-
-    /// The forge tool: `remove` on a `done` spec (D5, AGL-032): a
-    /// finished task is a historical fact.
-    pub const FORGE_TOOL_REMOVE_DONE: Msg = Msg {
-        en: "{name} is done; a finished task is a historical fact and stays",
-        uk: "{name} — done; завершена задача — історичний факт і залишається",
+    /// The last link of a list of alternatives: `a, b or c`.
+    pub const OR: Msg = Msg {
+        en: "or",
+        uk: "або",
     };
 
     /// The forge tool: `rename`'s new name is not a name (D6, AGL-032):

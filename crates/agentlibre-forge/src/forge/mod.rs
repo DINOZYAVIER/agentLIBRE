@@ -11,10 +11,14 @@
 
 pub mod error;
 mod actions;
-pub mod task_spec;
+pub mod kind;
+pub mod naming;
+pub mod range;
 
-pub use actions::{change_status, find_artifact, new_task_spec, store_names};
+pub use actions::{change_status, find_artifact, new_artifact, store_entries, store_names};
+pub use kind::{Kind, Kinds};
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -661,8 +665,11 @@ pub fn rehome_new(ws: &Workspace, lang: agentlibre_common::i18n::Lang) -> Result
     Ok(tr!(lang, m::FORGE_STORE_NEW, dir = ws.dir.display()))
 }
 
-/// A parsed artifact: the `forge/v2` envelope, the raw `<type>` set
-/// table, and the body, verbatim.
+/// The keys of the envelope every kind keeps (AGL-124, D7).
+pub const ENVELOPE: &[&str] = &["schema", "type", "name", "status", "created", "updated"];
+
+/// A parsed artifact: the `forge/v2` envelope (AGL-124, D7), the fields
+/// its kind's description declares, and the body, verbatim.
 #[derive(Debug, Clone)]
 pub struct Artifact {
     /// The file's path.
@@ -671,55 +678,33 @@ pub struct Artifact {
     pub type_name: String,
     /// The `name` field.
     pub name: String,
-    /// The `status` field (validated for the known types).
+    /// The `status` field (one of its kind's statuses).
     pub status: String,
     /// The `created` date (`YYYY-MM-DD`).
     pub created: String,
     /// The `updated` date (`YYYY-MM-DD`).
     pub updated: String,
-    pub deps: Vec<String>,
-    pub supersedes: Vec<String>,
-    /// `verification.cmds`, when the set is present.
-    pub cmds: Option<Vec<String>>,
-    /// The set named by the type (`task-spec = { … }`), carried
-    /// unparsed.
-    pub type_table: Value,
+    /// The fields past the envelope, by name; a dotted name is a nested
+    /// key (D10). Of a type with no description found, the keys as they
+    /// are (D18).
+    pub fields: BTreeMap<String, Value>,
     /// The body, verbatim.
     pub body: String,
 }
 
+impl Artifact {
+    /// The strings of the list field `name`; none when it is absent.
+    pub fn strings(&self, name: &str) -> Vec<String> {
+        match self.fields.get(name) {
+            Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+            Some(Value::String(text)) => vec![text.clone()],
+            _ => Vec::new(),
+        }
+    }
+}
+
 /// The header of a store file for `list`: parsed (a known or an
 /// unknown type), an unknown schema (never parsed), or unparseable.
-/// One kind of artifact file of the forge (AGL-121, D18): the name it
-/// goes by in the `type` of the file, its lifecycle — the statuses and
-/// their edges —, its scaffold, its check. A second kind adds one entry
-/// to `TYPES` and no branch anywhere else.
-pub trait ArtifactType {
-    /// The value of the artifact's `type`.
-    fn name(&self) -> &'static str;
-    /// The statuses of the lifecycle, as written in `status`.
-    fn statuses(&self) -> &'static [&'static str];
-    /// Whether the status `from` may move to the status `to`.
-    fn allows(&self, from: &str, to: &str) -> bool;
-    /// Whether `status` ends the lifecycle: nothing moves from it.
-    fn terminal(&self, status: &str) -> bool {
-        self.statuses().iter().all(|to| !self.allows(status, to))
-    }
-    /// The scaffold of a new artifact named `name`, dated `today`.
-    fn scaffold(&self, name: &str, today: &str) -> Artifact;
-    /// The type's own check of `artifact`.
-    fn check(&self, artifact: &Artifact) -> Result<(), Error>;
-}
-
-/// The registry of artifact kinds (AGL-121, D18): `task-spec` is the
-/// first and only entry; a second kind adds one entry here.
-pub static TYPES: &[&(dyn ArtifactType + Send + Sync)] = &[&task_spec::SpecType];
-
-/// The artifact kind named `name`, read off the registry.
-pub fn type_of(name: &str) -> Option<&'static (dyn ArtifactType + Send + Sync)> {
-    TYPES.iter().copied().find(|kind| kind.name() == name)
-}
-
 #[derive(Debug)]
 pub enum Header {
     Artifact(Box<Artifact>),
@@ -814,15 +799,17 @@ fn eval_front(path: &Path, front: &str) -> Result<Value, Error> {
 }
 
 /// Parses and validates the front matter of `path` strictly: the
-/// `forge/v2` envelope (AGL-041), the type's set carried unparsed (and
-/// validated by the type when it is known), and the body.
-pub fn parse_artifact(path: &Path, text: &str) -> Result<Artifact, Error> {
+/// `forge/v2` envelope (AGL-041), the fields its kind declares (AGL-124),
+/// and the body.
+pub fn parse_artifact(path: &Path, text: &str, kinds: &Kinds) -> Result<Artifact, Error> {
     let (front, body) = split_front_matter(path, text)?;
-    artifact_of(path, eval_front(path, &front)?, body)
+    artifact_of(path, eval_front(path, &front)?, body, kinds)
 }
 
-/// The artifact of the evaluated front matter `value` of `path`.
-fn artifact_of(path: &Path, value: Value, body: String) -> Result<Artifact, Error> {
+/// The artifact of the evaluated front matter `value` of `path`: a type
+/// with no description found keeps its keys as they are, for `list` and
+/// `show` (AGL-124, D18); a broken description is the error.
+fn artifact_of(path: &Path, value: Value, body: String, kinds: &Kinds) -> Result<Artifact, Error> {
     let mut file = Section::top(path, value)?;
     let schema = file.required_string("schema")?;
     if schema != SCHEMA {
@@ -839,53 +826,33 @@ fn artifact_of(path: &Path, value: Value, body: String) -> Result<Artifact, Erro
     check_date("created", &created, path)?;
     let updated = file.required_string("updated")?;
     check_date("updated", &updated, path)?;
-    let deps = file.strings("deps")?.unwrap_or_default();
-    let supersedes = file.strings("supersedes")?.unwrap_or_default();
-    let cmds = match file.section("verification")? {
-        None => None,
-        Some(mut verification) => {
-            verification.check_keys(&["cmds"])?;
-            Some(verification.strings("cmds")?.unwrap_or_default())
-        }
+    let Value::Object(rest) = file.into_value() else {
+        unreachable!("a section is a set")
     };
-    let type_table = file
-        .section(&type_name)?
-        .ok_or_else(|| Error::from(ForgeError::ArtifactTypeTableMissing {
-            path: path.into(),
-            type_name: type_name.clone(),
-        }))?
-        .into_value();
-    // The known keys were read, so a remainder is an unknown key of the
-    // envelope.
-    if let Some(key) = file.keys().first() {
-        return Err(ForgeError::ArtifactKey {
-            path: path.into(),
-            key: file.key(key),
+    let fields = if kinds.knows(&type_name) {
+        let kind = kinds.get(&type_name)?;
+        if !kind.statuses.contains(&status) {
+            return Err(ForgeError::BadState { state: status, type_name, statuses: kind.statuses.clone() }.into());
         }
-        .into());
-    }
-    let artifact = Artifact {
+        kind.take_fields(path, rest)?
+    } else {
+        rest.into_iter().collect()
+    };
+    Ok(Artifact {
         path: path.into(),
         type_name,
         name,
         status,
         created,
         updated,
-        deps,
-        supersedes,
-        cmds,
-        type_table,
+        fields,
         body,
-    };
-    if let Some(kind) = type_of(&artifact.type_name) {
-        kind.check(&artifact)?;
-    }
-    Ok(artifact)
+    })
 }
 
 /// The header of the evaluated front matter `value` of `path`: an
 /// unknown schema or an invalid envelope is marked, not an error.
-fn header_of(path: &Path, value: Value, body: String) -> Header {
+fn header_of(path: &Path, value: Value, body: String, kinds: &Kinds) -> Header {
     let schema = value
         .get("schema")
         .and_then(Value::as_str)
@@ -894,7 +861,7 @@ fn header_of(path: &Path, value: Value, body: String) -> Header {
     if schema != SCHEMA {
         return Header::UnknownSchema { schema };
     }
-    match artifact_of(path, value, body) {
+    match artifact_of(path, value, body, kinds) {
         Ok(artifact) => Header::Artifact(Box::new(artifact)),
         Err(error) => Header::Broken {
             detail: error.to_string(),
@@ -904,7 +871,7 @@ fn header_of(path: &Path, value: Value, body: String) -> Header {
 
 /// Reads the header of the store file `path` for `list`: it does not
 /// fail on an unknown schema or an unparseable file, it marks them.
-pub fn read_header(path: &Path) -> Result<Header, Error> {
+pub fn read_header(path: &Path, kinds: &Kinds) -> Result<Header, Error> {
     let text = fs::read_to_string(path).map_err(|source| Error::from(CommonError::Read {
         path: path.into(),
         source,
@@ -918,7 +885,7 @@ pub fn read_header(path: &Path) -> Result<Header, Error> {
         }
     };
     match eval_front(path, &front) {
-        Ok(value) => Ok(header_of(path, value, body)),
+        Ok(value) => Ok(header_of(path, value, body, kinds)),
         Err(error @ Error::Common(agentlibre_common::error::Error::Nix(nix::Error::NotFound { .. }))) => Err(error),
         Err(error) => Ok(Header::Broken {
             detail: error.to_string(),
@@ -931,7 +898,7 @@ pub fn read_header(path: &Path) -> Result<Header, Error> {
 /// about 14 ms each would be about 0.6 s); when that evaluation fails,
 /// one evaluation per file, so a broken file is marked and the others
 /// are read.
-pub fn read_headers(paths: &[PathBuf]) -> Result<Vec<Header>, Error> {
+pub fn read_headers(paths: &[PathBuf], kinds: &Kinds) -> Result<Vec<Header>, Error> {
     let mut split = Vec::new();
     for path in paths {
         let text = fs::read_to_string(path).map_err(|source| Error::from(CommonError::Read {
@@ -956,50 +923,43 @@ pub fn read_headers(paths: &[PathBuf]) -> Result<Vec<Header>, Error> {
                 .iter()
                 .zip(values)
                 .zip(split)
-                .map(|((path, value), front)| header_of(path, value, front.expect("all split").1))
+                .map(|((path, value), front)| header_of(path, value, front.expect("all split").1, kinds))
                 .collect());
         }
     }
-    paths.iter().map(|path| read_header(path)).collect()
+    paths.iter().map(|path| read_header(path, kinds)).collect()
 }
 
-/// Renders an artifact: the front matter in the envelope key order, one
-/// key per line, `---`, and the body, the way the file is written
-/// (AGL-041: the form of the migration script, byte for byte).
+/// Renders an artifact: the envelope, then the fields by name (AGL-124,
+/// D25), one key per line, `---`, and the body, the way the file is
+/// written (AGL-041: the form of the migration script, byte for byte).
 pub fn render(artifact: &Artifact) -> String {
-    let strings = |items: &[String]| nix::render(&Value::Array(items.iter().cloned().map(Value::String).collect()));
     let mut front = String::from("{\n");
     for (key, value) in [
-        ("schema", nix::string(SCHEMA)),
-        ("type", nix::string(&artifact.type_name)),
-        ("name", nix::string(&artifact.name)),
-        ("status", nix::string(&artifact.status)),
-        ("created", nix::string(&artifact.created)),
-        ("updated", nix::string(&artifact.updated)),
-        ("deps", strings(&artifact.deps)),
-        ("supersedes", strings(&artifact.supersedes)),
+        ("schema", SCHEMA),
+        ("type", &artifact.type_name),
+        ("name", &artifact.name),
+        ("status", &artifact.status),
+        ("created", &artifact.created),
+        ("updated", &artifact.updated),
     ] {
-        front.push_str(&format!("  {key} = {value};\n"));
+        front.push_str(&format!("  {key} = {};\n", nix::string(value)));
     }
-    front.push_str(&format!(
-        "  {} = {};\n",
-        nix::key(&artifact.type_name),
-        nix::render(&artifact.type_table)
-    ));
-    if let Some(cmds) = &artifact.cmds {
-        front.push_str(&format!("  verification.cmds = {};\n", strings(cmds)));
+    for (name, value) in &artifact.fields {
+        let key: Vec<String> = name.split('.').map(nix::key).collect();
+        front.push_str(&format!("  {} = {};\n", key.join("."), nix::render(value)));
     }
     front.push('}');
     format!("---\n{front}\n---\n{}", artifact.body)
 }
 
 /// Reads and parses the artifact file `path`.
-pub fn load_artifact(path: &Path) -> Result<Artifact, Error> {
+pub fn load_artifact(path: &Path, kinds: &Kinds) -> Result<Artifact, Error> {
     let text = fs::read_to_string(path).map_err(|source| Error::from(CommonError::Read {
         path: path.into(),
         source,
     }))?;
-    parse_artifact(path, &text)
+    parse_artifact(path, &text, kinds)
 }
 
 /// Rewrites the artifact file: a temp file in the same directory plus
@@ -1069,7 +1029,7 @@ pub fn project_of(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use agentlibre_common::testutil::TempDir;
     use super::*;
 
@@ -1948,6 +1908,11 @@ mod tests {
         assert_eq!(below.dir, ws.dir);
     }
 
+    /// The kinds agl ships, and no other (AGL-124, D11).
+    pub(crate) fn shipped() -> Kinds {
+        Kinds::in_dirs(&[nix::nix_dir().unwrap().join(kind::DIR)])
+    }
+
     fn task_spec_text() -> &'static str {
         r#"---
 {
@@ -1973,22 +1938,22 @@ body line
     fn the_envelope_round_trips() {
         let path = Path::new("/s/agl-001-x.md");
         let text = task_spec_text();
-        let artifact = parse_artifact(path, text).unwrap();
+        let artifact = parse_artifact(path, text, &shipped()).unwrap();
         assert_eq!(artifact.type_name, "task-spec");
         assert_eq!(artifact.name, "agl-001-x");
         assert_eq!(artifact.status, "open");
         assert_eq!(artifact.created, "2026-10-15");
         assert_eq!(artifact.updated, "2026-10-15");
-        assert_eq!(artifact.deps, vec!["agl-000-a".to_string()]);
-        assert!(artifact.supersedes.is_empty());
-        assert_eq!(artifact.cmds, Some(vec!["true".to_string()]));
-        assert_eq!(artifact.type_table, serde_json::json!({ "anchor": "", "last": "" }));
+        assert_eq!(artifact.strings("deps"), vec!["agl-000-a".to_string()]);
+        assert!(artifact.strings("supersedes").is_empty());
+        assert_eq!(artifact.strings("verification.cmds"), vec!["true".to_string()]);
+        assert_eq!(artifact.fields["task-spec"], serde_json::json!({ "anchor": "", "last": "" }));
         // The body, verbatim.
         assert_eq!(artifact.body, "# AGL-001\n\nbody line\n");
         // Render and parse again: the file is byte-identical.
         assert_eq!(render(&artifact), text);
         assert_eq!(
-            parse_artifact(path, &render(&artifact)).unwrap().body,
+            parse_artifact(path, &render(&artifact), &shipped()).unwrap().body,
             artifact.body
         );
     }
@@ -1996,44 +1961,50 @@ body line
     #[test]
     fn the_envelope_is_strict() {
         let path = Path::new("/s/agl-001-x.md");
+        let kinds = shipped();
         // An unknown key at the top level.
         let text = task_spec_text().replace(
             "schema = \"forge/v2\";\n",
             "schema = \"forge/v2\";\n  extra = 1;\n",
         );
         assert!(matches!(
-            parse_artifact(path, &text),
+            parse_artifact(path, &text, &kinds),
             Err(crate::error::Error::Forge(ForgeError::ArtifactKey { key, .. })) if key == "extra"
         ));
         // A missing required key.
         let text = task_spec_text().replace("  status = \"open\";\n", "");
         assert!(matches!(
-            parse_artifact(path, &text),
+            parse_artifact(path, &text, &kinds),
             Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "status"
         ));
-        // A missing type table.
+        // A missing required field (AGL-124, D9).
         let text = task_spec_text().replace("  task-spec = { anchor = \"\"; last = \"\"; };\n", "");
         assert!(matches!(
-            parse_artifact(path, &text),
-            Err(crate::error::Error::Forge(ForgeError::ArtifactTypeTableMissing { type_name, .. }))
-                if type_name == "task-spec"
+            parse_artifact(path, &text, &kinds),
+            Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::MissingKey { key, .. }))) if key == "task-spec"
+        ));
+        // An unknown key in a nested set of the fields (D10).
+        let text = task_spec_text().replace("verification.cmds = [ \"true\" ];", "verification = { cmds = [ ]; extra = 1; };");
+        assert!(matches!(
+            parse_artifact(path, &text, &kinds),
+            Err(crate::error::Error::Forge(ForgeError::ArtifactKey { key, .. })) if key == "verification.extra"
         ));
         // An unknown key in the type table (the task-spec check).
         let text = task_spec_text().replace("task-spec = { ", "task-spec = { extra = 1; ");
         assert!(matches!(
-            parse_artifact(path, &text),
+            parse_artifact(path, &text, &kinds),
             Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::UnknownKey { key, .. }))) if key == "task-spec.extra"
         ));
         // A wrong type for a key.
         let text = task_spec_text().replace("deps = [ \"agl-000-a\" ]", "deps = 1");
         assert!(matches!(
-            parse_artifact(path, &text),
+            parse_artifact(path, &text, &kinds),
             Err(Error::Common(agentlibre_common::error::Error::Nix(agentlibre_common::nix::Error::WrongType { key, .. }))) if key == "deps"
         ));
         // A state outside the lifecycle (the task-spec check).
         let text = task_spec_text().replace("status = \"open\";", "status = \"draft\";");
         assert!(matches!(
-            parse_artifact(path, &text),
+            parse_artifact(path, &text, &kinds),
             Err(crate::error::Error::Forge(ForgeError::BadState { state, .. })) if state == "draft"
         ));
         // The dates are calendar dates.
@@ -2047,13 +2018,13 @@ body line
             ("20261015", false),
         ] {
             let text = task_spec_text().replace("created = \"2026-10-15\";", &format!("created = \"{value}\";"));
-            let broken = parse_artifact(path, &text).is_err();
+            let broken = parse_artifact(path, &text, &kinds).is_err();
             assert_eq!(broken, !ok, "created = {value}");
         }
     }
 
     #[test]
-    fn an_unknown_type_is_carried_unparsed() {
+    fn a_type_with_no_description_is_carried_unparsed() {
         let path = Path::new("/s/note-1.md");
         let text = r#"---
 {
@@ -2071,12 +2042,13 @@ body line
 ---
 a note
 "#;
-        let artifact = parse_artifact(path, text).unwrap();
+        // No description of `note` is found: its keys are kept as they are,
+        // for `list` and `show` (AGL-124, D18).
+        let artifact = parse_artifact(path, text, &shipped()).unwrap();
         assert_eq!(artifact.type_name, "note");
         assert_eq!(artifact.status, "whatever");
-        assert_eq!(artifact.type_table, serde_json::json!({ "mood": "fine", "n": 3 }));
-        // And the round trip, byte for byte.
-        assert_eq!(render(&artifact), text);
+        assert_eq!(artifact.fields["note"], serde_json::json!({ "mood": "fine", "n": 3 }));
+        assert_eq!(artifact.fields["verification"], serde_json::json!({ "cmds": [] }));
     }
 
     #[test]
@@ -2084,14 +2056,14 @@ a note
         let path = Path::new("/s/old.md");
         let text = task_spec_text().replace("schema = \"forge/v2\"", "schema = \"forge/v1\"");
         assert!(matches!(
-            parse_artifact(path, &text),
+            parse_artifact(path, &text, &shipped()),
             Err(crate::error::Error::Forge(ForgeError::ArtifactUnknownSchema { schema, .. })) if schema == "forge/v1"
         ));
         // `list` marks it instead of failing.
         let dir = TempDir::new();
         let file = dir.path().join("old.md");
         fs::write(&file, &text).unwrap();
-        match read_header(&file).unwrap() {
+        match read_header(&file, &shipped()).unwrap() {
             Header::UnknownSchema { schema, .. } => assert_eq!(schema, "forge/v1"),
             other => panic!("expected an unknown schema, got {other:?}"),
         }
@@ -2102,32 +2074,32 @@ a note
         let dir = TempDir::new();
         let no_matter = dir.path().join("no-matter.md");
         fs::write(&no_matter, "no front matter at all\n").unwrap();
-        match read_header(&no_matter).unwrap() {
+        match read_header(&no_matter, &shipped()).unwrap() {
             Header::Broken { .. } => {}
             other => panic!("expected a broken header, got {other:?}"),
         }
         // Nix that does not evaluate, and a front matter that is not a set.
         let bad = dir.path().join("bad-nix.md");
         fs::write(&bad, "---\n{ schema = ; }\n---\nbody\n").unwrap();
-        match read_header(&bad).unwrap() {
+        match read_header(&bad, &shipped()).unwrap() {
             Header::Broken { .. } => {}
             other => panic!("expected a broken header, got {other:?}"),
         }
         let list = dir.path().join("a-list.md");
         fs::write(&list, "---\n[ 1 ]\n---\nbody\n").unwrap();
         assert!(matches!(
-            parse_artifact(&list, &fs::read_to_string(&list).unwrap()),
+            parse_artifact(&list, &fs::read_to_string(&list).unwrap(), &shipped()),
             Err(crate::error::Error::Forge(ForgeError::ArtifactFrontMatter { .. }))
         ));
         // `list` reads them all in one evaluation, or file by file when one
         // is broken: the good ones are read either way (AGL-041).
         let good = dir.path().join("agl-001-x.md");
         fs::write(&good, task_spec_text()).unwrap();
-        let headers = read_headers(&[good.clone(), bad.clone(), good.clone()]).unwrap();
+        let headers = read_headers(&[good.clone(), bad.clone(), good.clone()], &shipped()).unwrap();
         assert!(matches!(&headers[0], Header::Artifact(artifact) if artifact.name == "agl-001-x"));
         assert!(matches!(&headers[1], Header::Broken { .. }));
         assert!(matches!(&headers[2], Header::Artifact(_)));
-        let headers = read_headers(&[good.clone(), good]).unwrap();
+        let headers = read_headers(&[good.clone(), good], &shipped()).unwrap();
         assert!(headers.iter().all(|header| matches!(header, Header::Artifact(_))));
     }
 
@@ -2136,12 +2108,12 @@ a note
         let dir = TempDir::new();
         let path = dir.path().join("agl-001-x.md");
         fs::write(&path, task_spec_text()).unwrap();
-        let mut artifact = load_artifact(&path).unwrap();
+        let mut artifact = load_artifact(&path, &shipped()).unwrap();
         let body = artifact.body.clone();
         artifact.status = "in-progress".into();
         artifact.updated = "2026-10-16".into();
         write_artifact(&artifact).unwrap();
-        let reread = load_artifact(&path).unwrap();
+        let reread = load_artifact(&path, &shipped()).unwrap();
         assert_eq!(reread.status, "in-progress");
         assert_eq!(reread.updated, "2026-10-16");
         assert_eq!(reread.body, body);

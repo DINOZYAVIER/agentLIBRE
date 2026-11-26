@@ -249,7 +249,7 @@ fn the_workspace_tools_are_dispatched_by_name() {
 
 // The in-turn `forge` tool (AGL-008).
 
-use agentlibre_forge::forge::{self, Artifact, Workspace, task_spec};
+use agentlibre_forge::forge::{self, Artifact, Kinds, Workspace};
 use agentlibre_common::i18n::Lang;
 
 /// A git repository initialized at `dir`.
@@ -270,6 +270,11 @@ fn git_init(dir: &Path) {
     run(&["config", "user.email", "test@example.com"]);
     run(&["config", "user.name", "Test"]);
 }
+
+/// The refusal of a write on the `note` of the fixture: no description
+/// of its kind (AGL-124, D18).
+const NO_NOTE: &str = "no description of the kind note is found: forge-types/note.nix is in none of \
+                       the store, the user's config or agl's";
 
 /// The forge tool fixture: a git workspace, and its store under a
 /// temporary data directory, resolved the way the tool resolves it.
@@ -296,13 +301,13 @@ impl ForgeStore {
     /// The task-spec `name` in `status`, the dates `2026-01-01`, the
     /// scaffold body.
     fn spec(&self, name: &str, status: &str) -> Artifact {
-        let mut artifact = task_spec::scaffold(name, "2026-01-01");
+        let mut artifact = Kinds::of(&self.ws.dir).get("task-spec").unwrap().scaffold(name, "2026-01-01");
         artifact.status = status.to_string();
         artifact.path = self
             .ws
             .dir
             .join("forge")
-            .join(task_spec::TYPE)
+            .join("task-spec")
             .join(format!("{name}.md"));
         artifact
     }
@@ -321,10 +326,7 @@ impl ForgeStore {
             status: "open".into(),
             created: "2026-01-01".into(),
             updated: "2026-01-01".into(),
-            deps: Vec::new(),
-            supersedes: Vec::new(),
-            cmds: None,
-            type_table: serde_json::json!({ "text": "a note" }),
+            fields: [("note".to_owned(), serde_json::json!({ "text": "a note" }))].into(),
             body: "\na note\n".into(),
         }
     }
@@ -355,6 +357,7 @@ impl ForgeStore {
             store: None,
             action: action.to_string(),
             name: field("name"),
+            kind: field("type"),
             title: field("title"),
             old: field("old"),
             new: field("new"),
@@ -386,7 +389,7 @@ fn forge_new_is_the_engine_scaffold() {
     let path =
         f.ws.dir
             .join("forge")
-            .join(task_spec::TYPE)
+            .join("task-spec")
             .join("agl-001-my-first-task.md");
     let result = f.call("new", &[("title", "My First Task")]);
     assert_eq!(
@@ -396,7 +399,7 @@ fn forge_new_is_the_engine_scaffold() {
             content: format!("created {}", path.display())
         }
     );
-    let artifact = forge::load_artifact(&path).unwrap();
+    let artifact = forge::load_artifact(&path, &Kinds::of(Path::new("/nowhere"))).unwrap();
     assert_eq!(artifact.status, "open");
     assert_eq!(artifact.created, clock::today());
     assert!(artifact.body.starts_with("\n## Objective\n"));
@@ -422,7 +425,7 @@ fn forge_new_is_the_engine_scaffold() {
         f.call("new", &[]),
         ToolResult {
             outcome: Outcome::Fail,
-            content: "forge new: title is missing; new takes title".into()
+            content: "forge new: title is missing; new takes title, type".into()
         }
     );
 }
@@ -553,7 +556,7 @@ fn the_status_keyed_rule() {
         let path =
             f.ws.dir
                 .join("forge")
-                .join(task_spec::TYPE)
+                .join("task-spec")
                 .join(format!("{name}.md"));
         f.write(&f.spec(&name, status));
         let result = f.call("remove", &[("name", &name)]);
@@ -567,13 +570,9 @@ fn the_status_keyed_rule() {
             );
             assert!(!path.exists());
         } else {
-            let content = match *status {
-                "in-progress" => format!(
-                    "{name} is in-progress; cancel it first (`status canceled`), then remove"
-                ),
-                "done" => format!("{name} is done; a finished task is a historical fact and stays"),
-                _ => unreachable!("the status is in the loop"),
-            };
+            // The statuses of the description's `actions.remove` (AGL-124,
+            // D13).
+            let content = format!("{name} is {status}; remove is allowed while open, canceled or backlog");
             assert_eq!(
                 result,
                 ToolResult {
@@ -660,7 +659,7 @@ fn forge_edit_is_the_workspace_edit_on_the_body() {
             content: "Replaced 1 occurrence in agl-001-d.".into()
         }
     );
-    let edited = forge::load_artifact(&artifact.path).unwrap();
+    let edited = forge::load_artifact(&artifact.path, &Kinds::of(Path::new("/nowhere"))).unwrap();
     assert!(edited.body.contains("## Goal"));
     assert!(!edited.body.contains("## Objective"));
     assert_eq!(edited.updated, clock::today());
@@ -685,7 +684,7 @@ fn forge_edit_is_the_workspace_edit_on_the_body() {
     );
     // The refusals did not touch the file.
     assert_eq!(
-        forge::load_artifact(&artifact.path).unwrap().body,
+        forge::load_artifact(&artifact.path, &Kinds::of(Path::new("/nowhere"))).unwrap().body,
         edited.body
     );
     // The per-action fields are checked.
@@ -727,7 +726,7 @@ fn forge_append_is_a_bullet_under_the_section() {
             content: "appended a bullet to ## Progress in agl-001-p".into()
         }
     );
-    let appended = forge::load_artifact(&artifact.path).unwrap();
+    let appended = forge::load_artifact(&artifact.path, &Kinds::of(Path::new("/nowhere"))).unwrap();
     assert!(
         appended.body.contains(
             "## Progress\n\
@@ -749,13 +748,13 @@ fn forge_append_is_a_bullet_under_the_section() {
     );
     assert_eq!(result.outcome, Outcome::Ok);
     assert!(
-        forge::load_artifact(&artifact.path)
+        forge::load_artifact(&artifact.path, &Kinds::of(Path::new("/nowhere")))
             .unwrap()
             .body
             .ends_with("- a check\n")
     );
     // A section that is not in the body is refused, nothing is written.
-    let before = forge::load_artifact(&artifact.path).unwrap();
+    let before = forge::load_artifact(&artifact.path, &Kinds::of(Path::new("/nowhere"))).unwrap();
     let result = f.call(
         "append",
         &[("name", "agl-001-p"), ("section", "Nope"), ("text", "x")],
@@ -768,7 +767,7 @@ fn forge_append_is_a_bullet_under_the_section() {
         }
     );
     assert_eq!(
-        forge::load_artifact(&artifact.path).unwrap().body,
+        forge::load_artifact(&artifact.path, &Kinds::of(Path::new("/nowhere"))).unwrap().body,
         before.body
     );
     // The section is an open name: any `## ` heading in the body.
@@ -785,7 +784,7 @@ fn forge_append_is_a_bullet_under_the_section() {
     );
     assert_eq!(result.outcome, Outcome::Ok);
     assert_eq!(
-        forge::load_artifact(&custom.path).unwrap().body,
+        forge::load_artifact(&custom.path, &Kinds::of(Path::new("/nowhere"))).unwrap().body,
         "## Progress\n- one\n- added\n## Verification\n- two\n"
     );
     // The per-action fields are checked.
@@ -811,7 +810,7 @@ fn forge_append_refuses_a_multi_line_text() {
     let f = ForgeStore::new();
     let artifact = f.spec("agl-001-l", "in-progress");
     f.write(&artifact);
-    let before = forge::load_artifact(&artifact.path).unwrap();
+    let before = forge::load_artifact(&artifact.path, &Kinds::of(Path::new("/nowhere"))).unwrap();
     // One newline: the error names the rule and the count.
     let result = f.call(
         "append",
@@ -845,7 +844,7 @@ fn forge_append_refuses_a_multi_line_text() {
         result.content
     );
     // Nothing was written: the body and `updated` are untouched.
-    let after = forge::load_artifact(&artifact.path).unwrap();
+    let after = forge::load_artifact(&artifact.path, &Kinds::of(Path::new("/nowhere"))).unwrap();
     assert_eq!(after.body, before.body);
     assert_eq!(after.updated, before.updated);
 }
@@ -855,7 +854,7 @@ fn forge_status_walks_the_lifecycle() {
     let f = ForgeStore::new();
     let artifact = f.spec("agl-001-s", "open");
     f.write(&artifact);
-    let body_before = forge::load_artifact(&artifact.path).unwrap().body.clone();
+    let body_before = forge::load_artifact(&artifact.path, &Kinds::of(Path::new("/nowhere"))).unwrap().body.clone();
     // The walk includes the parked state and its way back.
     for (from, to) in [
         ("open", "in-progress"),
@@ -880,13 +879,13 @@ fn forge_status_walks_the_lifecycle() {
                 section: Some(to.into()),
             })
         );
-        let moved = forge::load_artifact(&artifact.path).unwrap();
+        let moved = forge::load_artifact(&artifact.path, &Kinds::of(Path::new("/nowhere"))).unwrap();
         assert_eq!(moved.status, to);
         assert_eq!(moved.updated, clock::today());
     }
     // The body is byte-identical through the walk.
     assert_eq!(
-        forge::load_artifact(&artifact.path).unwrap().body,
+        forge::load_artifact(&artifact.path, &Kinds::of(Path::new("/nowhere"))).unwrap().body,
         body_before
     );
 }
@@ -938,14 +937,14 @@ fn forge_status_refuses_the_rest() {
         "frozen is not a task-spec state (open, in-progress, done, backlog, \
          canceled)"
     );
-    // The lifecycle is the task-spec's: a note is refused.
+    // The lifecycle is the kind's description's: a type with none is
+    // refused (AGL-124, D18).
     let note = f.note("a-note");
     f.write(&note);
     assert_eq!(
         f.call("status", &[("name", "a-note"), ("state", "in-progress")])
             .content,
-        "a-note is a note, not a task-spec; status applies to task-specs \
-         only"
+        NO_NOTE
     );
     // An absent artifact.
     assert_eq!(
@@ -1001,13 +1000,13 @@ fn forge_rename_is_identity_in_any_status() {
             .ws
             .dir
             .join("forge")
-            .join(task_spec::TYPE)
+            .join("task-spec")
             .join(format!("{name}.md"));
         let new = f
             .ws
             .dir
             .join("forge")
-            .join(task_spec::TYPE)
+            .join("task-spec")
             .join("agl-009-renamed.md");
         assert!(!old.exists(), "{status}");
         assert!(new.exists(), "{status}");
@@ -1022,8 +1021,8 @@ fn forge_rename_is_identity_in_any_status() {
 fn forge_rename_rewrites_the_references_of_the_store() {
     let f = ForgeStore::new();
     let mut a = f.spec("agl-001-a", "open");
-    a.deps = vec!["agl-002-b".into(), "agl-003-c".into()];
-    a.supersedes = vec!["agl-002-b".into()];
+    a.fields.insert("deps".into(), serde_json::json!(["agl-002-b", "agl-003-c"]));
+    a.fields.insert("supersedes".into(), serde_json::json!(["agl-002-b"]));
     let b = f.spec("agl-002-b", "in-progress");
     let c = f.spec("agl-003-c", "done");
     for artifact in [&a, &b, &c] {
@@ -1040,7 +1039,7 @@ fn forge_rename_rewrites_the_references_of_the_store() {
     let a_text = fs::read_to_string(
         f.ws.dir
             .join("forge")
-            .join(task_spec::TYPE)
+            .join("task-spec")
             .join("agl-001-a.md"),
     )
     .unwrap();
@@ -1051,13 +1050,13 @@ fn forge_rename_rewrites_the_references_of_the_store() {
         .ws
         .dir
         .join("forge")
-        .join(task_spec::TYPE)
+        .join("task-spec")
         .join("agl-002-b.md")
         .exists());
     let c_text = fs::read_to_string(
         f.ws.dir
             .join("forge")
-            .join(task_spec::TYPE)
+            .join("task-spec")
             .join("agl-003-c.md"),
     )
     .unwrap();
@@ -1068,26 +1067,31 @@ fn forge_rename_rewrites_the_references_of_the_store() {
         f.call("show", &[("name", "agl-002-b")]).outcome,
         Outcome::Fail
     );
-    // The rename works on the other types too: identity is the
-    // envelope's, the lifecycle is not.
-    let note = f.note("note-1");
-    f.write(&note);
+    // The rename works on the other kinds too: identity is the
+    // envelope's, the lifecycle is not (AGL-124).
+    let mut trial = Kinds::of(&f.ws.dir).get("trial").unwrap().scaffold("trial-001-x", "2026-01-01");
+    trial.path = f.ws.dir.join("forge").join("trial").join("trial-001-x.md");
+    f.write(&trial);
     let mut other = f.spec("agl-004-d", "open");
-    other.deps = vec!["note-1".into()];
+    other.fields.insert("deps".into(), serde_json::json!(["trial-001-x"]));
     f.write(&other);
     assert_eq!(
-        f.call("rename", &[("name", "note-1"), ("new", "note-two")])
+        f.call("rename", &[("name", "trial-001-x"), ("new", "trial-two")])
             .outcome,
         Outcome::Ok
     );
     let d_text = fs::read_to_string(
         f.ws.dir
             .join("forge")
-            .join(task_spec::TYPE)
+            .join("task-spec")
             .join("agl-004-d.md"),
     )
     .unwrap();
-    assert!(d_text.contains("deps = [ \"note-two\" ];"), "{d_text}");
+    assert!(d_text.contains("deps = [ \"trial-two\" ];"), "{d_text}");
+    // A type with no description is not written (D18).
+    let note = f.note("note-1");
+    f.write(&note);
+    assert_eq!(f.call("rename", &[("name", "note-1"), ("new", "note-two")]).content, NO_NOTE);
 }
 
 #[test]
@@ -1142,14 +1146,14 @@ fn forge_rename_refuses_the_misfires() {
         .ws
         .dir
         .join("forge")
-        .join(task_spec::TYPE)
+        .join("task-spec")
         .join("agl-001-a.md")
         .exists());
     assert!(f
         .ws
         .dir
         .join("forge")
-        .join(task_spec::TYPE)
+        .join("task-spec")
         .join("agl-002-b.md")
         .exists());
     // The absent artifact.
@@ -1160,7 +1164,7 @@ fn forge_rename_refuses_the_misfires() {
 }
 
 #[test]
-fn forge_writes_are_task_spec_only_and_reads_are_generic() {
+fn forge_writes_need_a_description_and_reads_are_generic() {
     let f = ForgeStore::new();
     let note = f.note("note-1");
     f.write(&note);
@@ -1173,14 +1177,14 @@ fn forge_writes_are_task_spec_only_and_reads_are_generic() {
         f.call("show", &[("name", "note-1")]).content,
         forge::render(&note)
     );
-    // The writes are task-spec only: the refusal names the action.
+    // The writes need the kind's description (AGL-124, D18).
     assert_eq!(
         f.call(
             "edit",
             &[("name", "note-1"), ("old", "a note"), ("new", "b note")]
         )
         .content,
-        "note-1 is a note, not a task-spec; edit applies to task-specs only"
+        NO_NOTE
     );
     assert_eq!(
         f.call(
@@ -1188,14 +1192,11 @@ fn forge_writes_are_task_spec_only_and_reads_are_generic() {
             &[("name", "note-1"), ("section", "Progress"), ("text", "x")]
         )
         .content,
-        "note-1 is a note, not a task-spec; append applies to task-specs only"
+        NO_NOTE
     );
-    assert_eq!(
-        f.call("remove", &[("name", "note-1")]).content,
-        "note-1 is a note, not a task-spec; remove applies to task-specs only"
-    );
+    assert_eq!(f.call("remove", &[("name", "note-1")]).content, NO_NOTE);
     // The refusals did not touch the file.
-    assert_eq!(forge::load_artifact(&note.path).unwrap().body, "\na note\n");
+    assert_eq!(forge::load_artifact(&note.path, &Kinds::of(Path::new("/nowhere"))).unwrap().body, "\na note\n");
     // A missing name, on a write that has one.
     assert_eq!(
         f.call("remove", &[]).content,
@@ -1256,7 +1257,7 @@ fn forge_edit_may_delete_text() {
         ],
     );
     assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
-    let edited = forge::load_artifact(&artifact.path).unwrap();
+    let edited = forge::load_artifact(&artifact.path, &Kinds::of(Path::new("/nowhere"))).unwrap();
     assert!(!edited.body.contains("## Objective"));
     // An empty `old` is still no `old`.
     assert_eq!(
@@ -1372,7 +1373,7 @@ fn forge_append_survives_a_missing_final_newline_and_fences() {
     );
     assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
     assert_eq!(
-        forge::load_artifact(&spec.path).unwrap().body,
+        forge::load_artifact(&spec.path, &Kinds::of(Path::new("/nowhere"))).unwrap().body,
         "## Progress\n- one\n- two\n"
     );
     // The heading itself at the end of the body, no newline.
@@ -1385,7 +1386,7 @@ fn forge_append_survives_a_missing_final_newline_and_fences() {
     );
     assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
     assert_eq!(
-        forge::load_artifact(&bare.path).unwrap().body,
+        forge::load_artifact(&bare.path, &Kinds::of(Path::new("/nowhere"))).unwrap().body,
         "## Progress\n- one\n"
     );
     // A `## ` line inside a fenced block is code: it neither ends the
@@ -1399,7 +1400,7 @@ fn forge_append_survives_a_missing_final_newline_and_fences() {
     );
     assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
     assert_eq!(
-        forge::load_artifact(&fenced.path).unwrap().body,
+        forge::load_artifact(&fenced.path, &Kinds::of(Path::new("/nowhere"))).unwrap().body,
         "## Progress\n- one\n```\n## Verification\n```\n- two\n\n## Verification\n- v\n"
     );
     let result = f.call(
@@ -1408,7 +1409,7 @@ fn forge_append_survives_a_missing_final_newline_and_fences() {
     );
     assert_eq!(result.outcome, Outcome::Ok, "{}", result.content);
     assert!(
-        forge::load_artifact(&fenced.path)
+        forge::load_artifact(&fenced.path, &Kinds::of(Path::new("/nowhere")))
             .unwrap()
             .body
             .ends_with("\n## Verification\n- v\n- w\n")

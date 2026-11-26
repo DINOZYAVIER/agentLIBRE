@@ -4,8 +4,7 @@
 
 use std::path::PathBuf;
 
-use super::task_spec;
-use super::{Artifact, Header, Workspace};
+use super::{naming, Artifact, Header, Kind, Kinds, Workspace};
 use agentlibre_common::clock;
 use crate::error::Error;
 use crate::forge::error::Error as ForgeError;
@@ -14,30 +13,42 @@ use agentlibre_common::i18n::Lang;
 /// The artifact of the store of `ws` named `name`: the files are parsed
 /// one by one, the match is on the `name` field, the file is
 /// `forge/<type>/<name>.md`.
-pub fn find_artifact(ws: &Workspace, name: &str) -> Result<Artifact, Error> {
+pub fn find_artifact(ws: &Workspace, kinds: &Kinds, name: &str) -> Result<Artifact, Error> {
+    let mut broken = None;
     for path in super::artifact_files(&ws.dir)? {
-        if let Ok(artifact) = super::load_artifact(&path)
-            && artifact.name == name
-        {
-            return Ok(artifact);
+        match super::load_artifact(&path, kinds) {
+            Ok(artifact) if artifact.name == name => return Ok(artifact),
+            Ok(_) => {}
+            // A file named after `name` that does not parse says why
+            // (AGL-124, D18: a broken description fails its artifacts).
+            Err(error) if path.file_stem().is_some_and(|stem| stem == name) => broken = Some(error),
+            Err(_) => {}
         }
     }
-    Err(ForgeError::ArtifactNotFound {
-        name: name.to_owned(),
-        dir: ws.dir.join("forge"),
-    }
-    .into())
+    Err(broken.unwrap_or_else(|| {
+        ForgeError::ArtifactNotFound {
+            name: name.to_owned(),
+            dir: ws.dir.join("forge"),
+        }
+        .into()
+    }))
+}
+
+/// The `name` and the `type` of each artifact of the store of `ws`.
+pub fn store_entries(ws: &Workspace, kinds: &Kinds) -> Result<Vec<(String, String)>, Error> {
+    let files = super::artifact_files(&ws.dir)?;
+    Ok(super::read_headers(&files, kinds)?
+        .into_iter()
+        .filter_map(|header| match header {
+            Header::Artifact(artifact) => Some((artifact.name, artifact.type_name)),
+            _ => None,
+        })
+        .collect())
 }
 
 /// The `name`s of the artifacts of the store of `ws`.
-pub fn store_names(ws: &Workspace) -> Result<Vec<String>, Error> {
-    let mut names = Vec::new();
-    for path in super::artifact_files(&ws.dir)? {
-        if let Header::Artifact(artifact) = super::read_header(&path)? {
-            names.push(artifact.name);
-        }
-    }
-    Ok(names)
+pub fn store_names(ws: &Workspace, kinds: &Kinds) -> Result<Vec<String>, Error> {
+    Ok(store_entries(ws, kinds)?.into_iter().map(|(name, _)| name).collect())
 }
 
 /// A name the human gave with `--name`: non-empty, no path separator.
@@ -45,7 +56,7 @@ pub fn valid_name(name: &str) -> bool {
     !name.is_empty() && !name.contains('/') && !name.contains('\\')
 }
 
-/// A task-spec that `new_task_spec` wrote.
+/// An artifact that `new_artifact` wrote.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Created {
     pub name: String,
@@ -54,15 +65,19 @@ pub struct Created {
     pub lines: Vec<String>,
 }
 
-/// The scaffold of a new task-spec in the store of `ws`: named `name`
-/// verbatim, or after the store's numbering and the slug of `title`.
-pub fn new_task_spec(
+/// The scaffold of a new artifact of `kind` in the store of `ws`: named
+/// `name` verbatim, or after the numbering of the artifacts of its type
+/// and the slug of `title` (AGL-124, D15). Names stay unique across the
+/// store.
+pub fn new_artifact(
     ws: &Workspace,
+    kinds: &Kinds,
+    kind: &Kind,
     lang: Lang,
     title: &str,
     name: Option<&str>,
 ) -> Result<Created, Error> {
-    let existing = store_names(ws)?;
+    let existing = store_entries(ws, kinds)?;
     let name = match name {
         Some(name) => {
             if !valid_name(name) {
@@ -71,23 +86,23 @@ pub fn new_task_spec(
             name.to_owned()
         }
         None => {
-            let (prefix, number) = task_spec::next_number(&existing);
-            format!("{prefix}-{number:03}-{}", task_spec::slug(title))
+            let of_type: Vec<String> = existing
+                .iter()
+                .filter(|(_, type_name)| *type_name == kind.name)
+                .map(|(name, _)| name.clone())
+                .collect();
+            let (prefix, number) = naming::next_number(&of_type, kind.prefix.as_deref());
+            format!("{prefix}-{number:03}-{}", naming::slug(title))
         }
     };
-    if existing.contains(&name) {
+    if existing.iter().any(|(taken, _)| *taken == name) {
         return Err(ForgeError::NameTaken {
             name,
             dir: ws.dir.join("forge"),
         }
         .into());
     }
-    let kind = super::type_of(task_spec::TYPE).expect("task-spec is in the registry");
-    let path = ws
-        .dir
-        .join("forge")
-        .join(kind.name())
-        .join(format!("{name}.md"));
+    let path = ws.dir.join("forge").join(&kind.name).join(format!("{name}.md"));
     let mut artifact = kind.scaffold(&name, &clock::today());
     artifact.path = path.clone();
     // The store is materialized on the first write.
@@ -96,7 +111,7 @@ pub fn new_task_spec(
     Ok(Created { name, path, lines })
 }
 
-/// A task-spec whose status `change_status` moved.
+/// An artifact whose status `change_status` moved.
 #[derive(Clone, Debug)]
 pub struct StatusChanged {
     /// As it was written.
@@ -106,21 +121,20 @@ pub struct StatusChanged {
     pub to: String,
 }
 
-/// Moves the task-spec `name` of `ws` to `state`: validates the
-/// transition, bumps `updated` and rewrites the file with the body
-/// byte-identical.
-pub fn change_status(ws: &Workspace, name: &str, state: &str) -> Result<StatusChanged, Error> {
-    let artifact = find_artifact(ws, name)?;
-    let kind = super::type_of(&artifact.type_name).ok_or_else(|| Error::from(ForgeError::NotTaskSpec {
-        name: name.to_owned(),
-        type_name: artifact.type_name.clone(),
-    }))?;
+/// Moves the artifact `name` of `ws` to `state` by the edges of its
+/// kind (AGL-124, D23): validates the transition, bumps `updated` and
+/// rewrites the file with the body byte-identical.
+pub fn change_status(ws: &Workspace, kinds: &Kinds, name: &str, state: &str) -> Result<StatusChanged, Error> {
+    let artifact = find_artifact(ws, kinds, name)?;
+    let kind = kinds.get(&artifact.type_name)?;
     let from = artifact.status.clone();
-    if !kind.statuses().contains(&from.as_str()) {
-        return Err(ForgeError::BadState { state: from }.into());
-    }
-    if !kind.statuses().contains(&state) {
-        return Err(ForgeError::BadState { state: state.to_owned() }.into());
+    if !kind.statuses.contains(&state.to_owned()) {
+        return Err(ForgeError::BadState {
+            state: state.to_owned(),
+            type_name: kind.name.clone(),
+            statuses: kind.statuses.clone(),
+        }
+        .into());
     }
     if from == state || !kind.allows(&from, state) {
         if kind.terminal(&from) {

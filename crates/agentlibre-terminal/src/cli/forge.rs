@@ -13,9 +13,8 @@ use crate::error::Error;
 #[cfg(test)]
 use crate::error::CoreError;
 use crate::forge;
-use crate::forge::task_spec;
-use crate::forge::task_spec::GitFlag;
-use crate::forge::{Artifact, Header, Workspace};
+use crate::forge::range::{self, GitFlag, Range};
+use crate::forge::{Artifact, Header, Kind, Kinds, Workspace};
 use agentlibre_common::i18n::{Lang, Msg, m};
 use agentlibre_common::paths::Paths;
 use agentlibre_common::settings::UserFile;
@@ -29,8 +28,9 @@ use agentlibre_common::error::Error as CommonError;
 pub enum ForgeAction {
     List,
     Show { name: String },
-    /// `new task-spec --title <t> [--name <n>]`.
-    New { title: String, name: Option<String> },
+    /// `new <type> --title <t> [--name <n>] [--type-file <path>]`
+    /// (AGL-124, D12).
+    New { type_name: String, title: String, name: Option<String>, type_file: Option<PathBuf> },
     Status { name: String, state: String },
     Check { name: String },
     Range { name: String, anchor: Option<String>, last: Option<String> },
@@ -105,13 +105,10 @@ pub fn run(
     }
     match action {
         ForgeAction::List => list(&workspace()?),
-        ForgeAction::Show { name } => {
-            let artifact = forge::find_artifact(&workspace()?, &name)?;
-            // A closed pipe, as in `forge show x | head`, is not an error.
-            let _ = write!(io::stdout(), "{}", forge::render(&artifact));
-            Ok(ExitCode::SUCCESS)
+        ForgeAction::Show { name } => show(&workspace()?, &name),
+        ForgeAction::New { type_name, title, name, type_file } => {
+            new(&workspace()?, lang, &type_name, title, name, type_file.as_deref())
         }
-        ForgeAction::New { title, name } => new_task_spec(&workspace()?, lang, title, name),
         ForgeAction::Status { name, state } => status(&workspace()?, lang, &name, &state),
         ForgeAction::Check { name } => check(&workspace()?, cwd, lang, &name),
         ForgeAction::Range { name, anchor, last } => {
@@ -221,19 +218,21 @@ fn list(ws: &Workspace) -> Result<ExitCode, Error> {
     // The git flags read the project directory when it is a git
     // repository (AGL-010); the cell is blank otherwise.
     let in_repository = forge::in_repository(&ws.project)?;
+    let kinds = Kinds::of(&ws.dir);
     let files = forge::artifact_files(&ws.dir)?;
     // One evaluation of all the front matters (AGL-041).
-    for (path, header) in files.iter().zip(forge::read_headers(&files)?) {
+    for (path, header) in files.iter().zip(forge::read_headers(&files, &kinds)?) {
         let stem = path
             .file_stem()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
         match header {
             Header::Artifact(artifact) => {
-                let flag = if in_repository && artifact.type_name == task_spec::TYPE {
-                    git_flag_cell(&artifact, &ws.project)?
-                } else {
-                    String::new()
+                // The flag of any kind with a range field (AGL-124, D26).
+                let range = kinds.get(&artifact.type_name).ok().and_then(Kind::range_field);
+                let flag = match range {
+                    Some(field) if in_repository => git_flag_cell(&artifact, field, &ws.project),
+                    _ => String::new(),
                 };
                 outln!(
                     "{:<24} {:<10} {:<8} {:<10} {}",
@@ -257,22 +256,55 @@ fn list(ws: &Workspace) -> Result<ExitCode, Error> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The git flag cell of the table for a task-spec: blank when `last`
-/// is empty, `ok` or `broken` (a range that cannot be verified is broken
-/// too).
-fn git_flag_cell(artifact: &Artifact, project: &Path) -> Result<String, Error> {
-    let spec = task_spec::take(artifact)?;
-    match task_spec::git_flag(&spec, project) {
-        Ok(None) => Ok(String::new()),
-        Ok(Some(GitFlag::Ok)) => Ok("ok".into()),
-        Ok(Some(GitFlag::Broken)) | Err(_) => Ok("broken".into()),
+/// The git flag cell of the table for the range `field` of `artifact`:
+/// blank when `last` is empty, `ok` or `broken` (a range that cannot be
+/// verified is broken too).
+fn git_flag_cell(artifact: &Artifact, field: &str, project: &Path) -> String {
+    match range::git_flag(&Range::of(artifact.fields.get(field)), project) {
+        Ok(None) => String::new(),
+        Ok(Some(GitFlag::Ok)) => "ok".into(),
+        Ok(Some(GitFlag::Broken)) | Err(_) => "broken".into(),
     }
 }
 
-/// `forge new task-spec --title <t> [--name <n>]`: the scaffold of a
-/// new task-spec, named after the store's numbering or `--name` verbatim.
-fn new_task_spec(ws: &Workspace, lang: Lang, title: String, name: Option<String>) -> Result<ExitCode, Error> {
-    let created = forge::new_task_spec(ws, lang, &title, name.as_deref())?;
+/// `forge show <name>`: the artifact's file, then what each field of its
+/// kind is (AGL-124, D9).
+fn show(ws: &Workspace, name: &str) -> Result<ExitCode, Error> {
+    let kinds = Kinds::of(&ws.dir);
+    let artifact = forge::find_artifact(ws, &kinds, name)?;
+    let mut text = forge::render(&artifact);
+    if let Ok(kind) = kinds.get(&artifact.type_name) {
+        for (field, declared) in &kind.fields {
+            text.push_str(&format!("# {field} ({}): {}\n", declared.kind.name(), declared.description));
+        }
+    }
+    // A closed pipe, as in `forge show x | head`, is not an error.
+    let _ = write!(io::stdout(), "{text}");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `forge new <type> --title <t> [--name <n>] [--type-file <path>]`: the
+/// scaffold of a new artifact of the kind, named after the numbering of
+/// its type or `--name` verbatim; the description is the one found for
+/// the store, or the file `--type-file` names (AGL-124, D12).
+fn new(
+    ws: &Workspace,
+    lang: Lang,
+    type_name: &str,
+    title: String,
+    name: Option<String>,
+    type_file: Option<&Path>,
+) -> Result<ExitCode, Error> {
+    let kinds = Kinds::of(&ws.dir);
+    let from_file;
+    let kind = match type_file {
+        Some(path) => {
+            from_file = Kind::load(type_name, path)?;
+            &from_file
+        }
+        None => kinds.get(type_name)?,
+    };
+    let created = forge::new_artifact(ws, &kinds, kind, lang, &title, name.as_deref())?;
     for line in &created.lines {
         outln!("{line}");
     }
@@ -280,17 +312,19 @@ fn new_task_spec(ws: &Workspace, lang: Lang, title: String, name: Option<String>
     Ok(ExitCode::SUCCESS)
 }
 
-/// The arguments of `forge new task-spec --title <t> [--name <n>]`.
+/// The arguments of `forge new <type> --title <t> [--name <n>]
+/// [--type-file <path>]`.
 fn new_args(args: &[OsString]) -> Result<ForgeAction, Error> {
-    // The type is a word of the action, not a value: `-h` there is an
-    // option, which `agl` turns into the help (AGL-061, D5).
-    match word(args, 1, "new")? {
-        type_name if type_name == task_spec::TYPE => {}
-        help @ ("-h" | "--help") => return Err(Error::UnknownOption(help.to_string())),
-        type_name => return Err(crate::forge::error::Error::NewType { type_name: type_name.to_string() }.into()),
-    }
+    // The type is a word of the action, not a value: an option there,
+    // `-h` above all, is one, which `agl` turns into the help (AGL-061,
+    // D5). Which types there are is the descriptions' (AGL-124).
+    let type_name = match word(args, 1, "new")? {
+        option if option.starts_with('-') => return Err(Error::UnknownOption(option.to_string())),
+        type_name => type_name.to_string(),
+    };
     let mut title: Option<String> = None;
     let mut name: Option<String> = None;
+    let mut type_file: Option<PathBuf> = None;
     let mut i = 2;
     while i < args.len() {
         let arg = word(args, i, "new")?;
@@ -312,20 +346,29 @@ fn new_args(args: &[OsString]) -> Result<ForgeAction, Error> {
                 i += 1;
                 name = Some(value.to_string());
             }
+            "--type-file" => {
+                if type_file.is_some() {
+                    return Err(Error::RepeatedOption("--type-file".into()));
+                }
+                let value = word(args, i, "--type-file")?;
+                i += 1;
+                type_file = Some(PathBuf::from(value));
+            }
             _ => return Err(Error::UnknownOption(arg.to_string())),
         }
     }
     let Some(title) = title else {
         return Err(Error::MissingValue("--title".into()));
     };
-    Ok(ForgeAction::New { title, name })
+    Ok(ForgeAction::New { type_name, title, name, type_file })
 }
 
 /// `forge status <name> <state>`: validates the transition, bumps
 /// `updated`, rewrites the file with the body byte-identical, and prints
 /// the range of the task, which it does not touch (AGL-044 D2).
 fn status(ws: &Workspace, lang: Lang, name: &str, state: &str) -> Result<ExitCode, Error> {
-    let changed = forge::change_status(ws, name, state)?;
+    let kinds = Kinds::of(&ws.dir);
+    let changed = forge::change_status(ws, &kinds, name, state)?;
     outln!(
         "{}",
         tr!(
@@ -336,13 +379,15 @@ fn status(ws: &Workspace, lang: Lang, name: &str, state: &str) -> Result<ExitCod
             to = changed.to.as_str()
         )
     );
-    let spec = task_spec::take(&changed.artifact)?;
-    outln!("{}", range_line(lang, name, &spec));
+    // The range of a kind that has one (AGL-124, D16).
+    if let Some(field) = kinds.get(&changed.artifact.type_name)?.range_field() {
+        outln!("{}", range_line(lang, name, &Range::of(changed.artifact.fields.get(field))));
+    }
     Ok(ExitCode::SUCCESS)
 }
 
 /// The range of a task-spec as a line; a value not set is named as such.
-fn range_line(lang: Lang, name: &str, spec: &task_spec::TaskSpec) -> String {
+fn range_line(lang: Lang, name: &str, spec: &Range) -> String {
     let value = |id: &str| {
         if id.is_empty() {
             tr!(lang, m::FORGE_RANGE_NOT_SET).to_owned()
@@ -371,27 +416,29 @@ fn range(
     anchor: Option<String>,
     last: Option<String>,
 ) -> Result<ExitCode, Error> {
-    let mut artifact = forge::find_artifact(ws, name)?;
-    if artifact.type_name != task_spec::TYPE {
-        return Err(crate::forge::error::Error::NotTaskSpec {
+    let kinds = Kinds::of(&ws.dir);
+    let mut artifact = forge::find_artifact(ws, &kinds, name)?;
+    // The one range field of the kind (AGL-124, D16).
+    let Some(field) = kinds.get(&artifact.type_name)?.range_field().map(str::to_owned) else {
+        return Err(crate::forge::error::Error::NoRange {
             name: name.to_string(),
             type_name: artifact.type_name,
         }
         .into());
-    }
-    let mut spec = task_spec::take(&artifact)?;
+    };
+    let mut spec = Range::of(artifact.fields.get(&field));
     if anchor.is_none() && last.is_none() {
         outln!("{}", range_line(lang, name, &spec));
         return Ok(ExitCode::SUCCESS);
     }
     let project = ws.project.as_path();
     if let Some(id) = anchor {
-        spec.anchor = task_spec::resolve_commit(project, &id)?;
+        spec.anchor = range::resolve_commit(project, &id)?;
     }
     if let Some(id) = last {
-        spec.last = task_spec::resolve_commit(project, &id)?;
+        spec.last = range::resolve_commit(project, &id)?;
     }
-    if let Some(GitFlag::Broken) = task_spec::git_flag(&spec, project)? {
+    if let Some(GitFlag::Broken) = range::git_flag(&spec, project)? {
         eprintln!(
             "{}",
             tr!(
@@ -405,24 +452,27 @@ fn range(
     }
     outln!("{}", range_line(lang, name, &spec));
     artifact.updated = clock::today();
-    artifact.type_table = task_spec_table(spec);
+    artifact.fields.insert(field, spec.value());
     forge::write_artifact(&artifact)?;
     Ok(ExitCode::SUCCESS)
 }
 
-/// `forge check <name>`: the structural checks (the name matches the
-/// file, the range, the `deps` and `supersedes` resolve), then the
-/// `verification.cmds` via `bash -c` in the cwd, streamed, the first
-/// failing command stops the run. The git checks read the project
-/// directory and are skipped when it is not in a git repository. It
-/// writes nothing (AGL-044 D1). Silent on success; the failures are lines.
+/// `forge check <name>`: the description of its kind first (AGL-124,
+/// D18), then the structural checks (the name matches the file, the
+/// range, the `ref` and `refs` fields resolve in the store), then the
+/// `cmds` fields via `bash -c` in the cwd, streamed, the first failing
+/// command stops the run. The git checks read the project directory and
+/// are skipped when it is not in a git repository. It writes nothing
+/// (AGL-044 D1). Silent on success; the failures are lines.
 fn check(
     ws: &Workspace,
     cwd: &Path,
     lang: Lang,
     name: &str,
 ) -> Result<ExitCode, Error> {
-    let artifact = forge::find_artifact(ws, name)?;
+    let kinds = Kinds::of(&ws.dir);
+    let artifact = forge::find_artifact(ws, &kinds, name)?;
+    let kind = kinds.get(&artifact.type_name)?;
     let mut failures: Vec<String> = Vec::new();
     // The name matches the file it is in.
     let stem = artifact
@@ -442,16 +492,10 @@ fn check(
     // repository (AGL-010).
     let project = ws.project.as_path();
     let in_repository = forge::in_repository(project)?;
-    if in_repository && artifact.type_name == task_spec::TYPE {
+    if in_repository && let Some(field) = kind.range_field() {
         // The range: the set ids resolve, the anchor is an ancestor of
         // the last.
-        let spec = task_spec::take(&artifact).unwrap_or_else(|error| {
-            failures.push(error.to_string());
-            task_spec::TaskSpec {
-                anchor: String::new(),
-                last: String::new(),
-            }
-        });
+        let spec = Range::of(artifact.fields.get(field));
         if !spec.anchor.is_empty() && !id_resolves(project, &spec.anchor) {
             failures.push(tr!(
                 lang,
@@ -472,7 +516,7 @@ fn check(
             && !spec.last.is_empty()
             && id_resolves(project, &spec.anchor)
             && id_resolves(project, &spec.last)
-            && let Ok(Some(GitFlag::Broken)) = task_spec::git_flag(&spec, project)
+            && let Ok(Some(GitFlag::Broken)) = range::git_flag(&spec, project)
         {
             failures.push(tr!(
                 lang,
@@ -482,15 +526,15 @@ fn check(
             ));
         }
     }
-    // `deps` and `supersedes` resolve in the store.
-    let names = forge::store_names(ws)?;
-    for (kind, list) in [("dep", &artifact.deps), ("supersedes", &artifact.supersedes)] {
-        for dep in list {
-            if !names.contains(dep) {
+    // The `ref` and `refs` fields resolve in the store.
+    let names = forge::store_names(ws, &kinds)?;
+    for (field, _) in kind.ref_fields() {
+        for dep in artifact.strings(field) {
+            if !dep.is_empty() && !names.contains(&dep) {
                 failures.push(tr!(
                     lang,
                     m::FORGE_CHECK_NOT_IN_STORE,
-                    kind = kind,
+                    kind = field,
                     name = dep.as_str()
                 ));
             }
@@ -504,7 +548,8 @@ fn check(
     }
     // The verification cmds: `sh -c` in the cwd, streamed, the first
     // failing command stops the run.
-    if run_cmds(cwd, lang, &artifact)? {
+    let cmds: Vec<String> = kind.cmds_fields().flat_map(|field| artifact.strings(field)).collect();
+    if run_cmds(cwd, lang, &cmds)? {
         return Ok(ExitCode::FAILURE);
     }
     Ok(ExitCode::SUCCESS)
@@ -519,17 +564,12 @@ fn id_resolves(cwd: &Path, id: &str) -> bool {
     .is_ok()
 }
 
-/// The `task-spec` set of `spec`.
-fn task_spec_table(spec: task_spec::TaskSpec) -> serde_json::Value {
-    serde_json::json!({ "anchor": spec.anchor, "last": spec.last })
-}
-
-/// Runs the `verification.cmds` of `artifact` via the tools' `bash -c`
-/// (AGL-040, D4), without the wrapper's variables (D3), in `cwd`, their output on the parent's own streams (streamed, not
-/// captured); `true` when one fails (the run stops at the first
-/// failure).
-fn run_cmds(cwd: &Path, lang: Lang, artifact: &Artifact) -> Result<bool, Error> {
-    for cmd in artifact.cmds.as_deref().unwrap_or_default() {
+/// Runs the commands `cmds` via the tools' `bash -c` (AGL-040, D4),
+/// without the wrapper's variables (D3), in `cwd`, their output on the
+/// parent's own streams (streamed, not captured); `true` when one fails
+/// (the run stops at the first failure).
+fn run_cmds(cwd: &Path, lang: Lang, cmds: &[String]) -> Result<bool, Error> {
+    for cmd in cmds {
         let mut command = std::process::Command::new(agentlibre_common::programs::program("bash")?);
         let status = agentlibre_common::programs::clean_env(&mut command)
             .arg("-c")
@@ -551,7 +591,7 @@ fn run_cmds(cwd: &Path, lang: Lang, artifact: &Artifact) -> Result<bool, Error> 
 /// `forge log <name>` (AGL-008): the commits of the artifact's file,
 /// `git log --oneline` in the store, streamed.
 fn log(ws: &Workspace, name: &str) -> Result<ExitCode, Error> {
-    let artifact = forge::find_artifact(ws, name)?;
+    let artifact = forge::find_artifact(ws, &Kinds::of(&ws.dir), name)?;
     git_scoped(&ws.dir, &log_args(&artifact, &ws.dir))
 }
 
@@ -572,7 +612,7 @@ fn diff(
     name: &str,
     commit: Option<&str>,
 ) -> Result<ExitCode, Error> {
-    let artifact = forge::find_artifact(ws, name)?;
+    let artifact = forge::find_artifact(ws, &Kinds::of(&ws.dir), name)?;
     git_scoped(&ws.dir, &diff_args(&artifact, &ws.dir, commit))
 }
 
@@ -790,6 +830,80 @@ mod tests {
         run(action, None, &UserFile::default(), &paths, cwd, Lang::En)
     }
 
+    /// The kinds agl ships, and no other (AGL-124, D11).
+    fn shipped() -> Kinds {
+        Kinds::in_dirs(&[agentlibre_common::nix::nix_dir().unwrap().join(crate::forge::kind::DIR)])
+    }
+
+    #[test]
+    fn a_trial_is_made_moved_and_kept_by_its_description() {
+        // AGL-124, Verification: D10's fields, D4's sections, D2's edges,
+        // D16's range refused naming the kind.
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        let repo = repo(&dir);
+        let (key, _) = key_and_file(&data, &repo);
+        forge(&data, &repo, &["new", "trial", "--title", "Inkling-2-Mini in Strata"]).unwrap();
+        let file = data.join(&key).join("forge/trial/trial-001-inkling-2-mini-in-strata.md");
+        let text = std::fs::read_to_string(&file).unwrap();
+        for line in ["  branch = \"\";", "  rig = \"\";", "  subject = \"\";", "## Goal\n", "## Log\n", "## Open questions\n"] {
+            assert!(text.contains(line), "{line}: {text}");
+        }
+        let name = "trial-001-inkling-2-mini-in-strata";
+        forge(&data, &repo, &["status", name, "running"]).unwrap();
+        forge(&data, &repo, &["status", name, "concluded"]).unwrap();
+        assert!(matches!(
+            forge(&data, &repo, &["status", name, "running"]),
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::TerminalState { .. })))
+        ));
+        assert!(matches!(
+            forge(&data, &repo, &["range", name]),
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::NoRange { type_name, .. }))) if type_name == "trial"
+        ));
+        assert_eq!(forge(&data, &repo, &["check", name]).unwrap(), ExitCode::SUCCESS);
+        // The task-specs keep their own numbering beside it (D15).
+        forge(&data, &repo, &["new", "task-spec", "--title", "First Task"]).unwrap();
+        assert!(data.join(&key).join("forge/task-spec/agl-001-first-task.md").is_file());
+        forge(&data, &repo, &["new", "trial", "--title", "Second"]).unwrap();
+        assert!(data.join(&key).join("forge/trial/trial-002-second.md").is_file());
+    }
+
+    #[test]
+    fn a_store_s_description_is_its_own_and_a_broken_one_fails_alone() {
+        // AGL-124, D11, D12, D18, D20.
+        let dir = TempDir::new();
+        let data = dir.0.join("data");
+        let repo = repo(&dir);
+        let (key, _) = key_and_file(&data, &repo);
+        forge(&data, &repo, &["new", "task-spec", "--title", "First Task"]).unwrap();
+        let types = data.join(&key).join("forge-types");
+        std::fs::create_dir_all(&types).unwrap();
+        std::fs::write(
+            types.join("trial.nix"),
+            r#"{ statuses = [ "tried" ]; initial = "tried"; fields = { }; prefix = "try"; }"#,
+        )
+        .unwrap();
+        forge(&data, &repo, &["new", "trial", "--title", "Mine"]).unwrap();
+        let text = std::fs::read_to_string(data.join(&key).join("forge/trial/try-001-mine.md")).unwrap();
+        assert!(text.contains("status = \"tried\";"), "{text}");
+        // A description from a file, for `new` alone (D12).
+        let file = dir.0.join("idea.nix");
+        std::fs::write(&file, r#"{ statuses = [ "raw" ]; initial = "raw"; }"#).unwrap();
+        forge(&data, &repo, &["new", "idea", "--title", "x", "--name", "idea-1", "--type-file", file.to_str().unwrap()]).unwrap();
+        assert!(matches!(
+            forge(&data, &repo, &["status", "idea-1", "raw"]),
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::UnknownKind { type_name }))) if type_name == "idea"
+        ));
+        // Broken, it fails its own kind with its path; the task-specs work.
+        std::fs::write(types.join("trial.nix"), r#"{ statuses = [ "tried" ]; initial = "gone"; }"#).unwrap();
+        assert!(matches!(
+            forge(&data, &repo, &["check", "try-001-mine"]),
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::KindDescription { path, .. }))) if path == types.join("trial.nix")
+        ));
+        assert_eq!(forge(&data, &repo, &["check", "agl-001-first-task"]).unwrap(), ExitCode::SUCCESS);
+        assert_eq!(forge(&data, &repo, &["list"]).unwrap(), ExitCode::SUCCESS);
+    }
+
     /// A git repository at `dir/proj` with one commit.
     fn repo(dir: &TempDir) -> PathBuf {
         let repo = dir.0.join("proj");
@@ -939,10 +1053,10 @@ mod tests {
             .join(&key)
             .join("forge/task-spec/agl-002-second-task.md")
             .is_file());
-        // Other types are not scaffolded.
+        // A type with no description is not scaffolded (AGL-124, D18).
         assert!(matches!(
             forge(&data, &repo, &["new", "note", "--title", "t"]),
-            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::NewType { type_name }))) if type_name == "note"
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::UnknownKind { type_name }))) if type_name == "note"
         ));
         // `--title` is required and unique.
         assert!(matches!(
@@ -1007,14 +1121,14 @@ mod tests {
             forge(&data, &repo, &["status", "agl-001-first-task", "frozen"]),
             Err(Error::Core(CoreError::Forge(crate::forge::error::Error::BadState { .. })))
         ));
-        // The lifecycle is the task-spec's.
-        let mut note = task_spec::scaffold("note", &clock::today());
+        // The lifecycle is the description's: a type with none has none.
+        let mut note = shipped().get("task-spec").unwrap().scaffold("note", &clock::today());
         note.type_name = "note".into();
         note.path = data.join(&key).join("forge/note/note.md");
         forge::write_artifact(&note).unwrap();
         assert!(matches!(
             forge(&data, &repo, &["status", "note", "in-progress"]),
-            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::NotTaskSpec { name, .. }))) if name == "note"
+            Err(Error::Core(CoreError::Forge(crate::forge::error::Error::UnknownKind { type_name }))) if type_name == "note"
         ));
         // An absent artifact.
         assert!(matches!(
@@ -1037,8 +1151,8 @@ mod tests {
         );
         assert_eq!(std::fs::read(&file).unwrap(), before);
         // A dep that is not in the store fails the check.
-        let mut artifact = forge::load_artifact(&file).unwrap();
-        artifact.deps.push("ghost".into());
+        let mut artifact = forge::load_artifact(&file, &shipped()).unwrap();
+        artifact.fields.insert("deps".into(), serde_json::json!(["ghost"]));
         forge::write_artifact(&artifact).unwrap();
         assert_eq!(
             forge(&data, &repo, &["check", "agl-001-first-task"]).unwrap(),
@@ -1113,11 +1227,8 @@ mod tests {
         let (_, file) = key_and_file(&data, &repo);
         forge(&data, &repo, &["new", "task-spec", "--title", "First Task"]).unwrap();
         let short = forge::git(&repo, &["rev-parse", "--short", "HEAD"]).unwrap();
-        let mut artifact = forge::load_artifact(&file).unwrap();
-        artifact.type_table = task_spec_table(task_spec::TaskSpec {
-            anchor: String::new(),
-            last: short.clone(),
-        });
+        let mut artifact = forge::load_artifact(&file, &shipped()).unwrap();
+        artifact.fields.insert("task-spec".into(), Range { anchor: String::new(), last: short.clone() }.value());
         forge::write_artifact(&artifact).unwrap();
         forge(&data, &repo, &["status", "agl-001-first-task", "in-progress"]).unwrap();
         let before = std::fs::read(&file).unwrap();
@@ -1128,8 +1239,8 @@ mod tests {
         forge(&data, &repo, &["check", "agl-001-first-task"]).unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), before);
         // The flag has nothing to say of it.
-        let artifact = forge::load_artifact(&file).unwrap();
-        assert_eq!(git_flag_cell(&artifact, &repo).unwrap(), "ok");
+        let artifact = forge::load_artifact(&file, &shipped()).unwrap();
+        assert_eq!(git_flag_cell(&artifact, "task-spec", &repo), "ok");
     }
 
     #[test]
@@ -1144,8 +1255,8 @@ mod tests {
         forge::git(&repo, &["commit", "-q", "--allow-empty", "-m", "second"]).unwrap();
         let second = forge::git(&repo, &["rev-parse", "HEAD"]).unwrap();
         let held = || {
-            let artifact = forge::load_artifact(&file).unwrap();
-            let spec = task_spec::take(&artifact).unwrap();
+            let artifact = forge::load_artifact(&file, &shipped()).unwrap();
+            let spec = Range::of(artifact.fields.get("task-spec"));
             (spec.anchor, spec.last)
         };
         // Without an option it only prints.
@@ -1191,7 +1302,7 @@ mod tests {
 
     #[test]
     fn the_line_of_a_range_names_what_is_not_set() {
-        let spec = task_spec::TaskSpec { anchor: String::new(), last: "abc".into() };
+        let spec = Range { anchor: String::new(), last: "abc".into() };
         assert_eq!(range_line(Lang::En, "x", &spec), "x: anchor none, last abc");
         assert_eq!(range_line(Lang::Uk, "x", &spec), "x: anchor немає, last abc");
     }
@@ -1290,7 +1401,7 @@ mod tests {
         assert!(log.contains("record the spec"), "{log}");
         // An uncommitted append to the body: the diff shows it,
         // against the index and against the commit.
-        let mut artifact = forge::load_artifact(&file).unwrap();
+        let mut artifact = forge::load_artifact(&file, &shipped()).unwrap();
         artifact.body.push_str("- a bullet\n");
         forge::write_artifact(&artifact).unwrap();
         assert_eq!(
@@ -1326,18 +1437,18 @@ mod tests {
         git_in(&store, &["add", "-A"]);
         git_in(&store, &["commit", "-q", "-m", "record the specs"]);
         let second_file = store.join("forge/task-spec/agl-002-second-task.md");
-        let mut second = forge::load_artifact(&second_file).unwrap();
+        let mut second = forge::load_artifact(&second_file, &shipped()).unwrap();
         second.body.push_str("- second bullet\n");
         forge::write_artifact(&second).unwrap();
         git_in(&store, &["commit", "-q", "-am", "touch only the second"]);
-        let mut first = forge::load_artifact(&file).unwrap();
+        let mut first = forge::load_artifact(&file, &shipped()).unwrap();
         first.body.push_str("- first bullet\n");
         forge::write_artifact(&first).unwrap();
-        let mut second = forge::load_artifact(&second_file).unwrap();
+        let mut second = forge::load_artifact(&second_file, &shipped()).unwrap();
         second.body.push_str("- later second bullet\n");
         forge::write_artifact(&second).unwrap();
         let spec = "forge/task-spec/agl-001-first-task.md";
-        let first = forge::load_artifact(&file).unwrap();
+        let first = forge::load_artifact(&file, &shipped()).unwrap();
         // The arguments carry the file's pathspec after `--` ...
         assert_eq!(
             log_args(&first, &store),
