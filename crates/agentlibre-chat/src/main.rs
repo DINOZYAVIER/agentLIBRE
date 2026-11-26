@@ -940,7 +940,15 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
                         past.with(|past| {
                             past.iter()
                                 .find(|session| session.id == id)
-                                .map(|session| session.name.clone().unwrap_or_else(|| session.first.clone()))
+                                // A session with no name and no message yet: its time.
+                                .map(|session| {
+                                    session
+                                        .name
+                                        .clone()
+                                        .filter(|name| !name.trim().is_empty())
+                                        .or_else(|| Some(session.first.clone()).filter(|first| !first.trim().is_empty()))
+                                        .unwrap_or_else(|| session.time.replace('T', " ").trim_end_matches('Z').to_owned())
+                                })
                                 .unwrap_or_default()
                         })
                     })
@@ -1321,8 +1329,10 @@ fn inspected(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize) {
     })
     .unwrap_or_default();
     for (text, heading) in parts {
+        // A paragraph, not a label: a line of the session may be many
+        // (`/help`), and a label is one line high.
         if heading {
-            cx.label(text, Tone::Dim);
+            cx.paragraph(text, Tone::Dim);
         } else {
             let node = cx.group(Sty::column(), move |cx| {
                 cx.paragraph(text.clone(), Tone::Normal);
