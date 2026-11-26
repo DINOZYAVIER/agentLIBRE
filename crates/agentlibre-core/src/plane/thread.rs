@@ -227,17 +227,10 @@ impl Run {
                 Ok(())
             }
             Err(error) => {
-                // The same telling as a turn's (AGL-135, D2): a server that
-                // does not come up stops, the human's Ctrl-C does not.
-                observer.end(
-                    match &error {
-                        Error::Common(agentlibre_common::error::Error::Interrupted) => {
-                            PhaseEvent::Failed
-                        }
-                        _ => PhaseEvent::Stop(crate::session::StopReason::ServerError),
-                    },
-                    &mut *forward,
-                );
+                // The start as a session opens is no turn: it ends `Failed`,
+                // with no card and no Continue for a session that has
+                // nothing to go on with (AGL-135, D2).
+                observer.end(PhaseEvent::Failed, &mut *forward);
                 Err(error)
             }
         }
@@ -418,6 +411,8 @@ mod tests {
         broken: AtomicBool,
         /// A Ctrl-C came as it started.
         stopped: AtomicBool,
+        /// It says it loads to the first ask of its health.
+        loading: AtomicBool,
     }
 
     impl Backend for Fake {
@@ -468,7 +463,7 @@ mod tests {
         }
 
         fn health(&self) -> Option<u16> {
-            Some(200)
+            Some(if self.loading.swap(false, Ordering::SeqCst) { 503 } else { 200 })
         }
 
         fn url(&self) -> &str {
@@ -625,6 +620,29 @@ mod tests {
         fake.broken.store(false, Ordering::SeqCst);
         let done = handle.ask(say("Now"), &mut |_| {}).unwrap();
         assert!(matches!(done.turn, Some(Ok(TurnEnd::Answer(_)))));
+    }
+
+    #[test]
+    fn a_server_that_does_not_start_as_a_session_opens_tells_no_stop() {
+        // AGL-135, D2: no card with Continue for a session with no turn.
+        let dir = TempDir::new();
+        let fake = Arc::new(Fake::default());
+        fake.broken.store(true, Ordering::SeqCst);
+        fake.loading.store(true, Ordering::SeqCst);
+        let mut run = run(&dir, fake);
+        // A server outside agl that loads: the start is waited for.
+        run.autostart.effective.llama_external = Some(true);
+        let handle = run.start();
+        let mut ends = Vec::new();
+        let done = handle
+            .ask(Command::Start, &mut |sent| {
+                if let Sent::Report(Report::Transition(transition)) = sent {
+                    ends.push(transition.event.name());
+                }
+            })
+            .unwrap();
+        assert!(matches!(done.said, Some(Err(Error::Said { .. }))));
+        assert_eq!(ends.last().map(String::as_str), Some("failed"), "{ends:?}");
     }
 
     #[test]
