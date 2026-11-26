@@ -4,7 +4,7 @@
 //! the row under the field says — the Function, the context, the phase and
 //! the speed (AGL-139, D1) — and the row of phases under each answer (D6).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use agentlibre_common::i18n::{Lang, m};
@@ -32,9 +32,9 @@ pub struct Dock {
     pub phase: Phase,
     /// When the phase began: its time is what has gone since.
     since: Option<Instant>,
-    /// What is being decoded now: when its first token came and how many
-    /// since, for the speed of the row (D6).
-    decoding: Option<(Instant, usize)>,
+    /// When the recent pieces of what is being decoded arrived, within the
+    /// second of the row's speed (D6), as the REPL's dock counts them.
+    pieces: VecDeque<Instant>,
 }
 
 impl Default for Dock {
@@ -45,7 +45,7 @@ impl Default for Dock {
             used: None,
             phase: Phase::Ready,
             since: None,
-            decoding: None,
+            pieces: VecDeque::new(),
         }
     }
 }
@@ -85,12 +85,25 @@ impl Dock {
         }
     }
 
-    /// The speed of what is being decoded, none between generations
-    /// (AGL-139, D6).
+    /// The speed of what is being decoded: the pieces of the last second per
+    /// its span, none before two of them have come (AGL-139, D6).
     pub fn speed(&self) -> Option<f64> {
-        let (since, tokens) = self.decoding?;
-        let seconds = since.elapsed().as_secs_f64();
-        (tokens > 0 && seconds > 0.0).then(|| tokens as f64 / seconds)
+        let (first, last) = (self.pieces.front()?, self.pieces.back()?);
+        if self.pieces.len() < 2 {
+            return None;
+        }
+        let span = last.duration_since(*first).as_secs_f64();
+        (span > 0.0).then(|| self.pieces.len() as f64 / span)
+    }
+
+    /// A piece of the thinking or of the text arrived: the row's speed
+    /// counts it, keeping only the last second of them (AGL-139, D6).
+    fn piece(&mut self) {
+        let now = Instant::now();
+        self.pieces.push_back(now);
+        while self.pieces.len() > 1 && now.duration_since(self.pieces[0]).as_secs_f64() > 1.0 {
+            self.pieces.pop_front();
+        }
     }
 }
 
@@ -259,7 +272,7 @@ impl Chat {
         self.turn = Turn::default();
         self.dock.phase = Phase::Ready;
         self.dock.since = None;
-        self.dock.decoding = None;
+        self.dock.pieces.clear();
         let mut turn = 0;
         for event in events {
             match event {
@@ -309,6 +322,7 @@ impl Chat {
                 Report::Thinking(piece) => {
                     self.thinking_since.get_or_insert_with(Instant::now);
                     self.thinking.get_or_insert_with(String::new).push_str(piece);
+                    self.dock.piece();
                 }
                 // The thinking's event is the session file's; what was written
                 // goes to the fold, for the record of its step (D19).
@@ -318,7 +332,10 @@ impl Chat {
                         self.fold.event(&Event::Thinking(text));
                     }
                 }
-                Report::ActionText(piece) => self.writing.get_or_insert_with(String::new).push_str(piece),
+                Report::ActionText(piece) => {
+                    self.writing.get_or_insert_with(String::new).push_str(piece);
+                    self.dock.piece();
+                }
                 Report::ContextUsed(tokens) => self.dock.used = Some(*tokens),
                 Report::Decoded(tokens) => self.decoded(*tokens),
                 Report::Transition(transition) => self.transition(transition),
@@ -361,7 +378,7 @@ impl Chat {
         self.dock.phase = transition.to.clone();
         self.dock.since = Some(Instant::now());
         // A generation ends with its phase; its speed goes with it.
-        self.dock.decoding = None;
+        self.dock.pieces.clear();
         if transition.from != Phase::Ready {
             let tool = match &transition.from {
                 Phase::Running(tool) => tool.as_str(),
@@ -384,13 +401,9 @@ impl Chat {
         }
     }
 
-    /// The tokens that came of what is being decoded (AGL-139, D6): the
-    /// row's speed is theirs over the time since the first of them.
+    /// The tokens a step decoded (AGL-139, D6): the row under its answer
+    /// divides them by the time of the thinking and of the writing.
     fn decoded(&mut self, tokens: usize) {
-        self.dock.decoding = Some(match self.dock.decoding {
-            Some((since, gone)) => (since, gone + tokens),
-            None => (Instant::now(), tokens),
-        });
         self.turn.tokens += tokens;
     }
 
@@ -477,6 +490,19 @@ mod tests {
         assert_eq!(notes(&chat), ["load: 42%", "the server answered: 4\u{a0}096 of context"]);
         // The row knows the size the server answered with.
         assert_eq!(chat.dock().context, Some(4096));
+    }
+
+    #[test]
+    fn the_row_counts_the_pieces_of_the_last_second() {
+        let mut chat = Chat::new(Lang::En);
+        // One piece says nothing; two say what their span gives.
+        chat.sent(&Sent::Report(Report::ActionText("a".into())));
+        assert!(chat.dock().speed().is_none());
+        chat.sent(&Sent::Report(Report::ActionText("b".into())));
+        assert!(chat.dock().speed().is_some());
+        // The phase's end clears the speed with the generation.
+        chat.sent(&transition(Phase::Writing, Phase::Ready, 0));
+        assert!(chat.dock().speed().is_none());
     }
 
     #[test]
