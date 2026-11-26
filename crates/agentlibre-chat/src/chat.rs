@@ -255,13 +255,20 @@ impl Chat {
             .map(|items| items.join(" \u{b7} "))
     }
 
-    /// The session as it opened (AGL-139, D1): its Function and, when the
-    /// server had answered already, its context.
+    /// The session as it opened (AGL-139, D1): its Function and its
+    /// server's context, none while the server has not answered (its
+    /// `Sent::Context` says it then); nothing of its prompts yet.
     pub fn opened(&mut self, opened: &Opened) {
         self.dock.function = opened.function.clone();
-        if self.dock.context.is_none() {
-            self.dock.context = opened.context;
-        }
+        self.dock.context = opened.context;
+        self.dock.used = None;
+    }
+
+    /// A new session on the same Function and server, as `/new` gives it
+    /// (AGL-139, D1): nothing held, and nothing of its prompts yet.
+    pub fn fresh(&mut self) {
+        self.history(&[], &[]);
+        self.dock.used = None;
     }
 
     /// A session's past, in place of what is held.
@@ -524,6 +531,34 @@ mod tests {
         // The row under the field says the phase the last transition gave.
         assert_eq!(chat.dock().phase, Phase::Ready);
         assert!(chat.dock().speed().is_none());
+    }
+
+    fn opened(function: &str, context: Option<usize>) -> Opened {
+        Opened { function: function.into(), context, ..Opened::default() }
+    }
+
+    #[test]
+    fn another_session_s_row_says_its_own_context() {
+        let mut chat = Chat::new(Lang::En);
+        chat.opened(&opened("a", Some(131_072)));
+        chat.sent(&Sent::Report(Report::ContextUsed(41_213)));
+        // Another session, on a server that has not answered yet.
+        chat.opened(&opened("b", None));
+        assert_eq!(chat.dock().function, "b");
+        assert_eq!(chat.dock().usage(), "\u{2014}");
+        // On a server of another size.
+        chat.opened(&opened("c", Some(4096)));
+        assert_eq!(chat.dock().usage(), "\u{2014} / 4\u{a0}096");
+    }
+
+    #[test]
+    fn a_new_session_keeps_the_server_but_not_the_prompt() {
+        let mut chat = Chat::new(Lang::En);
+        chat.opened(&opened("a", Some(4096)));
+        chat.sent(&Sent::Report(Report::ContextUsed(1024)));
+        chat.fresh();
+        assert_eq!(chat.dock().function, "a");
+        assert_eq!(chat.dock().usage(), "\u{2014} / 4\u{a0}096");
     }
 
     #[test]

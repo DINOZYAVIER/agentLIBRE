@@ -370,7 +370,7 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                     if !done.session.id.is_empty() && !ours(&done.session.id) {
                         session.set(Some(done.session.id.clone()));
                         info.update(|info| info.session = done.session.id.clone());
-                        chat.update(|chat| chat.history(&[], &[]));
+                        chat.update(Chat::fresh);
                     }
                     if done.turn.is_some() {
                         busy.set(false);
