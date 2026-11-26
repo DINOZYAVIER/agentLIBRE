@@ -1,17 +1,15 @@
 //! What a client of the daemon needs, and nothing else (AGL-076, D5, D6,
 //! D7; AGL-121, D29, D65): its socket, the connection that says `hello`,
-//! the daemon started when none answers, a stop reason's name, and the fold
-//! of what a session reports into a conversation.
+//! the daemon started when none answers, and a stop reason's name; the
+//! records of a session are `agentlibre-surface`'s fold (AGL-127, D3).
 //!
 //! Only `proto` is beneath the crate, so a client that cannot link the core
 //! (AGL-076 D2) links this instead of repeating it: the terminal and
 //! `agl notify` take it through the core, the chat takes it directly.
 
-mod conversation;
 mod remote;
 mod surface;
 
-pub use conversation::{Conversation, Row, Step, Who};
 pub use remote::{Answer, AtPrompt, Command, Remote};
 pub use surface::{Surface, give};
 

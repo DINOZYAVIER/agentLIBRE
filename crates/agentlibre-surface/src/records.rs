@@ -404,6 +404,12 @@ impl Fold {
         self.steps.push(None);
     }
 
+    /// A line of the surface's own, not of the session: a refusal, an
+    /// error, a stop (AGL-128).
+    pub fn note(&mut self, line: String, role: Role) {
+        self.push(notice(line, role, None));
+    }
+
     /// Folds the next event of the session.
     pub fn event(&mut self, event: &Event) {
         let lang = self.lang;

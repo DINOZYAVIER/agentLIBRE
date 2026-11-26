@@ -9,8 +9,14 @@ use std::cell::RefCell;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use agentlibre_client::{Client, Conversation, Row, Start, Step, Who};
+mod chat;
+
+use agentlibre_client::{Client, Start};
+use agentlibre_common::i18n::Lang;
+use agentlibre_common::style::Role;
 use agentlibre_proto::{self as proto, Ask, Phase, Reply, Report, Request, Sent};
+use agentlibre_surface::records::{self, Record};
+use chat::Chat;
 use katarsa_app::App;
 use katarsa_reactive::signal;
 use katarsa_ui::reactive::{Ui, prop};
@@ -73,13 +79,13 @@ fn parse(args: &[String]) -> Result<Option<Args>, String> {
 }
 
 /// The language of the environment: Ukrainian or English.
-fn lang() -> &'static str {
+fn lang() -> Lang {
     let ukrainian = ["LC_ALL", "LC_MESSAGES", "LANG"]
         .iter()
         .filter_map(|name| std::env::var(name).ok())
         .find(|value| !value.is_empty())
         .is_some_and(|value| value.starts_with("uk"));
-    if ukrainian { "uk" } else { "en" }
+    if ukrainian { Lang::Uk } else { Lang::En }
 }
 
 /// The window's styles (KS-032), logical pixels.
@@ -115,7 +121,7 @@ fn main() -> ExitCode {
     let args = match parse(&args) {
         Ok(Some(args)) => args,
         Ok(None) => {
-            println!("{}", if lang == "uk" { HELP_UK } else { HELP_EN });
+            println!("{}", if lang == Lang::Uk { HELP_UK } else { HELP_EN });
             return ExitCode::SUCCESS;
         }
         Err(error) => {
@@ -133,13 +139,14 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: Args, lang: &str) -> Result<bool, Box<dyn std::error::Error>> {
+fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
     let dir = std::env::current_dir()?;
     // The daemon's socket and its start are the clients' crate's (AGL-121, D29).
     let socket = agentlibre_client::socket_of_env(|name| std::env::var_os(name))
         .ok_or("XDG_RUNTIME_DIR is not set, so the daemon has no place for its socket")?;
-    let out = Arc::new(Client::connect(&socket, true, lang, Start::OnPath)?);
-    let conversation = signal(Conversation::default());
+    let words = if lang == Lang::Uk { "uk" } else { "en" };
+    let out = Arc::new(Client::connect(&socket, true, words, Start::OnPath)?);
+    let chat = signal_chat(lang);
     let session = signal(None::<String>);
     let busy = signal(false);
     let question = signal(None::<(u64, String)>);
@@ -156,16 +163,14 @@ fn run(args: Args, lang: &str) -> Result<bool, Box<dyn std::error::Error>> {
                     session.set(Some(id.clone()));
                     send(&out, &Request::History { session: id });
                 }
-                Reply::History { events, .. } => conversation.update(|conversation| {
-                    if conversation.rows.is_empty() {
-                        *conversation = Conversation::of_history(&events);
-                    }
-                }),
+                Reply::History {
+                    events, transitions, ..
+                } => chat.update(|chat| chat.history(&events, &transitions)),
                 Reply::Sent { session: of, sent } if ours(&of) => {
                     if let Sent::Report(Report::Transition(transition)) = &sent {
                         busy.set(transition.to != Phase::Ready);
                     }
-                    conversation.update(|conversation| conversation.sent(&sent));
+                    chat.update(|chat| chat.sent(&sent));
                 }
                 Reply::Done {
                     session: of, done, ..
@@ -173,7 +178,7 @@ fn run(args: Args, lang: &str) -> Result<bool, Box<dyn std::error::Error>> {
                     if done.turn.is_some() {
                         busy.set(false);
                     }
-                    conversation.update(|conversation| conversation.done(&done));
+                    chat.update(|chat| chat.done(&done));
                 }
                 Reply::Question {
                     question: id,
@@ -190,15 +195,16 @@ fn run(args: Args, lang: &str) -> Result<bool, Box<dyn std::error::Error>> {
                             answer: None,
                         },
                     );
-                    conversation.update(|conversation| {
-                        conversation.note(
+                    chat.update(|chat| {
+                        chat.note(
                             "a question for a line was refused: answer it with agl in a terminal",
+                            Role::StatusFailure,
                         );
                     });
                 }
                 Reply::Refused { error } => {
                     busy.set(false);
-                    conversation.update(|conversation| conversation.note(&error));
+                    chat.update(|chat| chat.note(&error, Role::StatusFailure));
                 }
                 _ => {}
             }
@@ -249,19 +255,31 @@ fn run(args: Args, lang: &str) -> Result<bool, Box<dyn std::error::Error>> {
             size: [900, 720],
             min_size: Some([420, 320]),
         },
-        move |_| build(&out, conversation, session, busy, question, prompt),
+        move |_| build(&out, chat, session, busy, question, prompt),
     );
     Ok(app.run()?.clean)
+}
+
+/// The chat, as a signal.
+fn signal_chat(lang: Lang) -> Signal<Chat> {
+    signal(Chat::new(lang))
+}
+
+type Signal<T> = katarsa_reactive::Signal<T>;
+
+/// The record `at`, read from the chat.
+fn record_at<T>(chat: Signal<Chat>, at: usize, read: impl Fn(&Record) -> T) -> Option<T> {
+    chat.with(|chat| chat.records().get(at).map(&read))
 }
 
 /// The window's UI.
 fn build(
     out: &Arc<Client>,
-    conversation: katarsa_reactive::Signal<Conversation>,
-    session: katarsa_reactive::Signal<Option<String>>,
-    busy: katarsa_reactive::Signal<bool>,
-    question: katarsa_reactive::Signal<Option<(u64, String)>>,
-    prompt: katarsa_reactive::Signal<String>,
+    chat: Signal<Chat>,
+    session: Signal<Option<String>>,
+    busy: Signal<bool>,
+    question: Signal<Option<(u64, String)>>,
+    prompt: Signal<String>,
 ) -> Ui {
     let ui = Ui::new("chat");
     ui.styles(styles()).expect("the chat's styles work out");
@@ -310,7 +328,7 @@ fn build(
                     reasoning: None,
                 },
             );
-            conversation.update(|conversation| conversation.said(&text));
+            chat.update(|chat| chat.said(&text));
             prompt.set(String::new());
             busy.set(true);
         }
@@ -319,69 +337,24 @@ fn build(
     let copier = ui.clone();
     ui.mount(move |cx| {
         let area = cx.scroll_at_end(Sty::column().gap(8.0).grow(1.0), |_| {});
-        // A message is its speaker's name and its text; the rest a row each.
-        let items = move || {
-            conversation.with(|conversation| {
-                conversation
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(at, row)| {
-                        let named = row.who == Who::You;
-                        named.then_some((at, false)).into_iter().chain([(at, true)])
-                    })
-                    .collect::<Vec<_>>()
-            })
-        };
-        cx.keyed_in(
-            area,
-            items,
-            |item| *item,
-            move |cx, &(at, body)| {
-                if !body {
-                    cx.label("you", Tone::Dim);
-                    return;
-                }
-                let who =
-                    conversation.with(|conversation| conversation.rows.get(at).map(|row| row.who));
-                // The calls between two texts, folded (KS-042 D1, D3).
-                if who == Some(Who::Steps) {
-                    steps(cx, conversation, at);
-                    return;
-                }
-                let tone = match who {
-                    Some(Who::Note) => Tone::Dim,
-                    _ => Tone::Normal,
-                };
-                let text = prop(move || {
-                    conversation.with(|conversation| {
-                        conversation
-                            .rows
-                            .get(at)
-                            .map(|row| row.text.clone())
-                            .unwrap_or_default()
-                    })
-                });
-                // The agent's text is Markdown (katarsa-shell's KS-040), with a
-                // button that copies its source (KS-041 D3).
-                if who == Some(Who::Agent) {
-                    cx.markdown(Sty::column().gap(6.0), text);
-                    let ui = copier.clone();
-                    cx.group(Sty::row(), move |cx| {
-                        let button = cx.button("copy", "copy", move || {
-                            let source = conversation.with(|conversation| {
-                                conversation.rows.get(at).map(|row| row.text.clone())
-                            });
-                            if let Some(source) = source {
-                                ui.copy(source);
-                            }
-                        });
-                        // A quiet button, as a fold's header.
-                        cx.class(button, "fold");
-                    });
-                } else {
-                    cx.paragraph(text, tone);
-                }
+        let items = move || chat.with(|chat| (0..chat.records().len()).collect::<Vec<_>>());
+        let copier = copier.clone();
+        cx.keyed_in(area, items, |at| *at, move |cx, &at| record(cx, chat, at, &copier));
+        // What the step is writing now: its thinking, its text.
+        cx.show(
+            Sty::column().gap(6.0),
+            move || chat.with(|chat| chat.thinking.is_some()),
+            move |cx| {
+                let text = prop(move || chat.with(|chat| chat.thinking.clone().unwrap_or_default()));
+                cx.paragraph(text, Tone::Dim);
+            },
+        );
+        cx.show(
+            Sty::column().gap(6.0),
+            move || chat.with(|chat| chat.writing.is_some()),
+            move |cx| {
+                let text = prop(move || chat.with(|chat| chat.writing.clone().unwrap_or_default()));
+                cx.markdown(Sty::column().gap(6.0), text);
             },
         );
         let answer_yes = answer.clone();
@@ -426,64 +399,145 @@ fn build(
     ui
 }
 
-/// A row of steps as a fold: its header the number of calls and the last
-/// one's line, its body each call's line and its output (KS-042).
-fn steps(
-    cx: &mut katarsa_ui::reactive::Cx,
-    conversation: katarsa_reactive::Signal<Conversation>,
-    at: usize,
-) {
-    let header = prop(move || {
-        conversation.with(|conversation| {
-            conversation
-                .rows
-                .get(at)
-                .map(Row::header)
-                .unwrap_or_default()
-        })
-    });
-    cx.fold("steps", header, move |cx| {
-        let calls = move || {
-            conversation.with(|conversation| {
-                (0..conversation.rows.get(at).map_or(0, |row| row.steps.len())).collect::<Vec<_>>()
-            })
-        };
-        cx.keyed(
-            Sty::column().gap(4.0),
-            calls,
-            |call| *call,
-            move |cx, &call| {
-                let step = move |read: fn(&Step) -> String| {
-                    conversation.with(|conversation| {
-                        conversation
-                            .rows
-                            .get(at)
-                            .and_then(|row| row.steps.get(call))
-                            .map(read)
-                            .unwrap_or_default()
-                    })
-                };
-                let line = prop(move || {
-                    step(|step| {
-                        let mark = if step.failed { "\u{2717} " } else { "" };
-                        format!("{mark}{}", step.line)
-                    })
+/// The record `at`, as the transcript draws it (AGL-066): a message, a
+/// line, a call folded with its result (KS-042), an answer in Markdown with a
+/// button that copies its source (KS-041 D3).
+fn record(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, copier: &Ui) {
+    let Some(kind) = record_at(chat, at, |record| match record {
+        Record::User(_) => 0,
+        Record::Wake { .. } => 1,
+        Record::State(_) => 2,
+        Record::Tool { .. } => 3,
+        Record::Answer { .. } => 4,
+        Record::Notice { .. } => 5,
+    }) else {
+        return;
+    };
+    let read = move |read: fn(&Record) -> String| prop(move || record_at(chat, at, read).unwrap_or_default());
+    match kind {
+        0 => {
+            cx.label("you", Tone::Dim);
+            cx.paragraph(read(|record| match record {
+                Record::User(text) => text.clone(),
+                _ => String::new(),
+            }), Tone::Normal);
+        }
+        1 => {
+            cx.label(read(|record| match record {
+                Record::Wake { flow, .. } => format!("wake {flow}"),
+                _ => String::new(),
+            }), Tone::Dim);
+            cx.paragraph(read(|record| match record {
+                Record::Wake { text, .. } => text.clone(),
+                _ => String::new(),
+            }), Tone::Normal);
+        }
+        2 => {
+            cx.label(read(|record| match record {
+                Record::State(state) => format!("[{state}]"),
+                _ => String::new(),
+            }), Tone::Dim);
+        }
+        3 => tool(cx, chat, at),
+        4 => {
+            if record_at(chat, at, |record| matches!(record, Record::Answer { thinking: Some(_), .. })) == Some(true) {
+                cx.fold("thinking", "thinking", move |cx| {
+                    cx.paragraph(read(|record| match record {
+                        Record::Answer { thinking, .. } => thinking.clone().unwrap_or_default(),
+                        _ => String::new(),
+                    }), Tone::Dim);
                 });
-                cx.paragraph(line, Tone::Dim);
-                cx.show(
-                    Sty::column(),
-                    move || !step(|step| step.output.clone().unwrap_or_default()).is_empty(),
-                    move |cx| {
-                        let node = cx.group(Sty::column(), move |cx| {
-                            let output =
-                                prop(move || step(|step| step.output.clone().unwrap_or_default()));
-                            cx.paragraph(output, Tone::Normal);
-                        });
-                        cx.class(node, "markdown.code");
-                    },
-                );
-            },
-        );
+            }
+            let text = read(|record| match record {
+                Record::Answer { text, .. } => text.clone(),
+                _ => String::new(),
+            });
+            cx.markdown(Sty::column().gap(6.0), text);
+            let ui = copier.clone();
+            cx.group(Sty::row(), move |cx| {
+                let ui = ui.clone();
+                let button = cx.button("copy", "copy", move || {
+                    if let Some(source) = record_at(chat, at, |record| match record {
+                        Record::Answer { text, .. } => text.clone(),
+                        _ => String::new(),
+                    }) {
+                        ui.copy(source);
+                    }
+                });
+                // A quiet button, as a fold's header.
+                cx.class(button, "fold");
+            });
+        }
+        _ => {
+            let tone = match record_at(chat, at, |record| match record {
+                Record::Notice { role, .. } => *role,
+                _ => Role::Muted,
+            }) {
+                Some(Role::StatusFailure) => Tone::Normal,
+                _ => Tone::Dim,
+            };
+            cx.paragraph(read(|record| match record {
+                Record::Notice { line, .. } => line.clone(),
+                _ => String::new(),
+            }), tone);
+        }
+    }
+}
+
+/// A call as a fold (KS-042): its header the outcome and the line of what it
+/// did, its body the thinking and the text before it, its input in full and
+/// its result.
+fn tool(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize) {
+    let header = prop(move || {
+        record_at(chat, at, |record| match record {
+            Record::Tool { call, result, hint, .. } => {
+                let (status, _) = records::status(result.as_ref().map(|result| result.outcome));
+                let what = if hint.is_empty() { call.name.clone() } else { format!("{} {hint}", call.name) };
+                format!("{what} · {status}")
+            }
+            _ => String::new(),
+        })
+        .unwrap_or_default()
+    });
+    cx.fold("call", header, move |cx| {
+        let part = move |read: fn(&Record) -> Option<String>| {
+            move || record_at(chat, at, read).flatten().unwrap_or_default()
+        };
+        let thinking = part(|record| match record {
+            Record::Tool { thinking, .. } => thinking.clone(),
+            _ => None,
+        });
+        let text = part(|record| match record {
+            Record::Tool { text, .. } => text.clone(),
+            _ => None,
+        });
+        let input = part(|record| match record {
+            Record::Tool { call, .. } => Some(records::call_input(call)),
+            _ => None,
+        });
+        let output = part(|record| match record {
+            Record::Tool { result, .. } => result.as_ref().map(|result| result.content.clone()),
+            _ => None,
+        });
+        let thinking_shown = thinking.clone();
+        cx.show(Sty::column(), move || !thinking_shown().is_empty(), move |cx| {
+            cx.paragraph(prop(thinking.clone()), Tone::Dim);
+        });
+        let text_shown = text.clone();
+        cx.show(Sty::column(), move || !text_shown().is_empty(), move |cx| {
+            cx.markdown(Sty::column().gap(6.0), prop(text.clone()));
+        });
+        let node = cx.group(Sty::column(), move |cx| {
+            cx.paragraph(prop(input.clone()), Tone::Normal);
+        });
+        cx.class(node, "markdown.code");
+        let output_shown = output.clone();
+        cx.show(Sty::column(), move || !output_shown().is_empty(), move |cx| {
+            let node = cx.group(Sty::column(), |cx| {
+                cx.paragraph(prop(output.clone()), Tone::Normal);
+            });
+            cx.class(node, "markdown.code");
+        });
     });
 }
 

@@ -17,7 +17,9 @@ path = "src/main.rs"
 
 [dependencies]
 agentlibre-client = { path = "../agentlibre-client" }
+agentlibre-common = { path = "../agentlibre-common" }
 agentlibre-proto = { path = "../agentlibre-proto" }
+agentlibre-surface = { path = "../agentlibre-surface" }
 katarsa-app = { path = "../../../katarsa-shell/crates/katarsa-app" }
 katarsa-reactive = { path = "../../../katarsa-shell/crates/katarsa-reactive" }
 katarsa-ui = { path = "../../../katarsa-shell/crates/katarsa-ui" }

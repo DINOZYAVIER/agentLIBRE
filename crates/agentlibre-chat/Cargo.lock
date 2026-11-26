@@ -13,7 +13,9 @@ name = "agentlibre-chat"
 version = "0.1.0"
 dependencies = [
  "agentlibre-client",
+ "agentlibre-common",
  "agentlibre-proto",
+ "agentlibre-surface",
  "katarsa-app",
  "katarsa-reactive",
  "katarsa-ui",
@@ -30,12 +32,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "agentlibre-common"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+]
+
+[[package]]
 name = "agentlibre-proto"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "agentlibre-surface"
+version = "0.1.0"
+dependencies = [
+ "agentlibre-client",
+ "agentlibre-common",
+ "agentlibre-proto",
+ "libc",
 ]
 
 [[package]]
