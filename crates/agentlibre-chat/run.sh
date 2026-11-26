@@ -5,6 +5,9 @@
 #            [--think <level>] [--yes]
 #   agl-chat --stop
 #
+# AGL_CHAT_FUNCTION names the Function of a new session (agentLIBRE-gpu-high
+# when unset; empty: the project's own).
+#
 # Builds the new agl and the chat when they are out of date, starts the
 # daemon when none answers (the installed agl has no daemon), and opens
 # the window. --stop stops the daemon.
@@ -48,5 +51,14 @@ done
 # 3. The chat, in katarsa-shell's shell (its Wayland and keyboard
 #    libraries); the window opens a session in $ORIGIN.
 args=("$@")
+# A new session runs the Function AGL_CHAT_FUNCTION names, Qwen3.8 27B on
+# llama-server by default: it comes up sooner than Strata's. --function on
+# the line wins; a resumed session keeps its own, and --resume with no id
+# only lists.
+function=${AGL_CHAT_FUNCTION-agentLIBRE-gpu-high}
+case " ${args[*]} " in
+  *" --function "* | *" --resume "* | *" --help "* | *" -h "*) ;;
+  *) [ -n "$function" ] && args+=(--function "$function") ;;
+esac
 exec nix-shell "$KATARSA/shell.nix" \
   --run "(cd $CHAT && cargo build -q) && exec $CHAT/target/debug/agl-chat ${args[*]@Q}"
