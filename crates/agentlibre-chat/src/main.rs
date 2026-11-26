@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 mod chat;
+mod look;
 mod slash;
 mod voice;
 
@@ -30,7 +31,6 @@ use katarsa_reactive::signal;
 use katarsa_ui::reactive::{Pasted, Ui, prop};
 use katarsa_ui::{Key, KeyInput};
 use katarsa_ui::retained::{Sty, Tone};
-use katarsa_ui::style::{Keys, Sheet, Style, StyleBuilder};
 use katarsa_wayland::WindowConfig;
 
 
@@ -113,20 +113,6 @@ fn lang() -> Lang {
         .find(|value| !value.is_empty())
         .is_some_and(|value| value.starts_with("uk"));
     if ukrainian { Lang::Uk } else { Lang::En }
-}
-
-/// The window's styles (KS-032), logical pixels.
-fn styles() -> Sheet {
-    let control = |style: StyleBuilder| style.pad_xy(10.0, 6.0);
-    Sheet::new()
-        .define(
-            "chat",
-            Style::builder()
-                .fill("oklch(0.19 0.01 260)")
-                .text_size(15.0),
-        )
-        .define("chat.field", control(Style::builder()))
-        .define("chat.button", control(Style::builder()))
 }
 
 /// What a reply of the daemon does.
@@ -433,6 +419,7 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                     quit: quit.clone(),
                     repl,
                     handle: handle.clone(),
+                    colors: user.colors.clone(),
                 },
             )
         },
@@ -532,6 +519,8 @@ struct State {
     repl: ReplSettings,
     /// What brings a dictation's text back to the loop.
     handle: katarsa_app::Handle,
+    /// The user's `colors` (D8).
+    colors: Vec<(Role, agentlibre_common::style::Style)>,
 }
 
 /// What the line over the field says while the microphone records.
@@ -584,9 +573,10 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
         quit,
         repl,
         handle,
+        colors,
     } = state;
     let ui = Ui::new("chat");
-    ui.styles(styles()).expect("the chat's styles work out");
+    ui.styles(look::styles(&colors)).expect("the chat's styles work out");
     ui.set_root_style(Sty::row().gap(14.0).pad(14.0));
     // Another session of the list: this one closed, that one opened; its
     // past comes with its `opened`.
@@ -1117,17 +1107,16 @@ fn record(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, copi
             });
         }
         _ => {
-            let tone = match record_at(chat, at, |record| match record {
-                Record::Notice { role, .. } => *role,
-                _ => Role::Muted,
-            }) {
-                Some(Role::StatusFailure) => Tone::Normal,
-                _ => Tone::Dim,
-            };
-            cx.paragraph(read(|record| match record {
+            let failed = record_at(chat, at, |record| {
+                matches!(record, Record::Notice { role: Role::StatusFailure, .. })
+            }) == Some(true);
+            let node = cx.paragraph(read(|record| match record {
                 Record::Notice { line, .. } => line.clone(),
                 _ => String::new(),
-            }), tone);
+            }), if failed { Tone::Normal } else { Tone::Dim });
+            if failed {
+                cx.class(node, "chat.failure");
+            }
         }
     }
 }
