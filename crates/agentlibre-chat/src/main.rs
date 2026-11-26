@@ -11,11 +11,14 @@ use std::sync::Arc;
 
 mod chat;
 mod slash;
+mod voice;
 
 use agentlibre_client::{Client, Start};
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::media::{Pending, Source};
 use agentlibre_common::reasoning::ReasoningLevel;
+use agentlibre_common::paths::Paths;
+use agentlibre_common::settings::{ReplSettings, UserFile};
 use agentlibre_common::tr;
 use agentlibre_common::style::Role;
 use agentlibre_proto::{self as proto, Ask, Phase, Reply, Report, Request, Sent};
@@ -24,7 +27,7 @@ use agentlibre_surface::{attach, words};
 use chat::Chat;
 use katarsa_app::App;
 use katarsa_reactive::signal;
-use katarsa_ui::reactive::{Ui, prop};
+use katarsa_ui::reactive::{Pasted, Ui, prop};
 use katarsa_ui::{Key, KeyInput};
 use katarsa_ui::retained::{Sty, Tone};
 use katarsa_ui::style::{Keys, Sheet, Style, StyleBuilder};
@@ -111,9 +114,14 @@ fn styles() -> Sheet {
 /// What a reply of the daemon does.
 type OnReply = Box<dyn FnMut(Reply)>;
 
+/// What the text of a dictation does, once the daemon gave it.
+type OnVoice = Box<dyn FnMut(Result<String, String>, voice::Mode)>;
+
 thread_local! {
     /// What a reply of the daemon does, on the loop's thread.
     static ON_REPLY: RefCell<Option<OnReply>> = const { RefCell::new(None) };
+    /// What a dictation's text does, on the loop's thread.
+    static ON_VOICE: RefCell<Option<OnVoice>> = const { RefCell::new(None) };
 }
 
 /// Sends `request` to the daemon; a daemon gone is told by the reader.
@@ -171,8 +179,24 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
     let confirm = signal(None::<String>);
     let switching = signal(None::<slash::Switch>);
 
+    // The user's settings, as the REPL reads them: the thinking, the longest
+    // recording, the colors (D4, D8). A file that does not load is said, and
+    // the defaults hold.
+    let user = Paths::from_env(|name| std::env::var_os(name))
+        .map_err(|error| error.message(lang))
+        .and_then(|paths| UserFile::load(&paths.settings_file()).map_err(|error| error.message(lang)));
+    let user = match user {
+        Ok(user) => user,
+        Err(error) => {
+            chat.update(|chat| chat.note(&error, Role::StatusFailure));
+            UserFile::default()
+        }
+    };
+    let repl = ReplSettings::of(&user);
+
     let mut app = App::new("agl-chat")?;
     let quit = app.quitter();
+    let handle = app.handle();
     {
         let out = Arc::clone(&out);
         let place = place.clone();
@@ -298,11 +322,11 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
         ON_REPLY.with(|slot| *slot.borrow_mut() = Some(Box::new(on_reply)));
     }
     // The daemon's lines, read apart and handed to the loop.
-    let handle = app.handle();
+    let reader = handle.clone();
     let client = Arc::clone(&out);
     std::thread::spawn(move || {
         let post = |reply: Reply| {
-            handle.post(move || {
+            reader.post(move || {
                 ON_REPLY.with(|slot| {
                     if let Some(on_reply) = slot.borrow_mut().as_mut() {
                         on_reply(reply);
@@ -353,6 +377,8 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                     confirm,
                     switching,
                     quit: quit.clone(),
+                    repl,
+                    handle: handle.clone(),
                 },
             )
         },
@@ -448,6 +474,26 @@ struct State {
     /// A `/function` or `/plane` switch being checked.
     switching: Signal<Option<slash::Switch>>,
     quit: katarsa_app::Quit,
+    /// The user's `repl` settings (D4).
+    repl: ReplSettings,
+    /// What brings a dictation's text back to the loop.
+    handle: katarsa_app::Handle,
+}
+
+/// What the line over the field says while the microphone records.
+fn recording_line(lang: Lang) -> String {
+    match lang {
+        Lang::Uk => "запис… Ctrl-R надсилає, Alt-R ставить у рядок".into(),
+        _ => "recording… Ctrl-R sends, Alt-R puts it in the line".into(),
+    }
+}
+
+/// What it says while the daemon transcribes.
+fn transcribing_line(lang: Lang) -> String {
+    match lang {
+        Lang::Uk => "розпізнаю…".into(),
+        _ => "transcribing…".into(),
+    }
 }
 
 /// The chat, as a signal.
@@ -482,6 +528,8 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
         confirm,
         switching,
         quit,
+        repl,
+        handle,
     } = state;
     let ui = Ui::new("chat");
     ui.styles(styles()).expect("the chat's styles work out");
@@ -524,6 +572,12 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
             }
         }
     };
+    // The messages sent from this window, for Up at the field's first line
+    // (D2), and the one recalled.
+    let sent = signal(Vec::<String>::new());
+    let recalled = signal(None::<usize>);
+    // What the microphone is doing, while it does.
+    let heard = signal(None::<String>);
     // A file attached to the next message: its placeholder goes into the
     // field, numbered after the session's media (AGL-014, D18).
     let attach_file = move |path: std::path::PathBuf| match Source::from_file(&path) {
@@ -613,7 +667,54 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
                 },
             );
             chat.update(|chat| chat.said(&text));
+            sent.update(|sent| sent.push(text.clone()));
+            recalled.set(None);
             busy.set(true);
+        }
+    };
+    // A dictation's text, once the daemon gave it: sent, or put in the
+    // field (AGL-123).
+    {
+        let submit = submit.clone();
+        let on_voice = move |text: Result<String, String>, mode: voice::Mode| {
+            heard.set(None);
+            match (text, mode) {
+                (Ok(text), voice::Mode::Send) if !text.trim().is_empty() => submit(text),
+                (Ok(text), _) => prompt.update(|prompt| prompt.push_str(text.trim())),
+                (Err(error), _) => chat.update(|chat| chat.note(&error, Role::StatusFailure)),
+            }
+        };
+        ON_VOICE.with(|slot| *slot.borrow_mut() = Some(Box::new(on_voice)));
+    }
+    let microphone = voice::Voice::default();
+    // Ctrl-R or Alt-R (D2): the first press records, the second stops and
+    // hands the recording to the daemon's whisper.
+    let press = {
+        let microphone = microphone.clone();
+        move |alt: bool| match microphone.press(alt, repl.max_record_seconds, lang) {
+            voice::Press::Started => heard.set(Some(recording_line(lang))),
+            voice::Press::Failed(error) => {
+                heard.set(None);
+                chat.update(|chat| chat.note(&error, Role::StatusFailure));
+            }
+            voice::Press::Stopped(wav, mode) => {
+                let Some(id) = session.get() else {
+                    heard.set(None);
+                    return;
+                };
+                heard.set(Some(transcribing_line(lang)));
+                let handle = handle.clone();
+                std::thread::spawn(move || {
+                    let text = voice::transcribe(&wav, id, lang);
+                    handle.post(move || {
+                        ON_VOICE.with(|slot| {
+                            if let Some(on_voice) = slot.borrow_mut().as_mut() {
+                                on_voice(text, mode);
+                            }
+                        });
+                    });
+                });
+            }
         }
     };
     // `/memory remove <name>`, once agreed.
@@ -731,6 +832,13 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
                 cx.button("stop", "Stop", stop);
             },
         );
+        cx.show(
+            Sty::row(),
+            move || heard.with(Option::is_some),
+            move |cx| {
+                cx.paragraph(prop(move || heard.get().unwrap_or_default()), Tone::Dim);
+            },
+        );
         let remove = remove.clone();
         cx.show(
             Sty::row().gap(8.0).centre_across(),
@@ -768,8 +876,29 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
             move || shown.get().get(menu_pick.get()).map(|&at| menu[at].0)
         };
         let take = pick.clone();
+        let press = press.clone();
         cx.on_field_key(field, move |key| {
+            // Ctrl-R and Alt-R dictate (D2).
+            if let KeyInput::Shortcut { letter: 'r', ctrl, alt, .. } = key.input
+                && (ctrl || alt)
+            {
+                press(alt);
+                return true;
+            }
             if !menu_open.get() {
+                // Up at the first line: the message before (D2).
+                if key.line == 0
+                    && let KeyInput::Press { key: Key::Up, shift: false, ctrl: false } = key.input
+                {
+                    let count = sent.with(Vec::len);
+                    if count == 0 {
+                        return false;
+                    }
+                    let at = recalled.get().map_or(count - 1, |at| at.saturating_sub(1));
+                    recalled.set(Some(at));
+                    prompt.set(sent.with(|sent| sent[at].clone()));
+                    return true;
+                }
                 return false;
             }
             let KeyInput::Press { key, .. } = &key.input else {
@@ -789,6 +918,30 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
                 _ => return false,
             }
             true
+        });
+        // Ctrl-V of a picture or of files attaches them (D2; KS-052).
+        let attach_file = attach_file.clone();
+        cx.on_paste(field, move |pasted| match pasted {
+            Pasted::Image { mime, bytes } => {
+                let ext = mime.strip_prefix("image/").unwrap_or("png").to_owned();
+                let source = Source {
+                    kind: agentlibre_common::media::Kind::Image,
+                    bytes,
+                    name: format!("clipboard.{ext}"),
+                    ext,
+                };
+                let mut placeholder = String::new();
+                pending.update(|pending| placeholder = attach::add_counted(&counts.get(), pending, source));
+                prompt.update(|prompt| {
+                    prompt.push_str(&placeholder);
+                    prompt.push(' ');
+                });
+            }
+            Pasted::Files(paths) => {
+                for path in paths {
+                    attach_file(path);
+                }
+            }
         });
         let rows = menu.clone();
         cx.popup_over(
