@@ -710,9 +710,24 @@ mod tests {
         let (mut other, _) = Client::new(&socket, proto::VERSION);
         proto::send(&mut client.out, &say(&id, "one")).unwrap();
         proto::send(&mut other.out, &say(&id[..24], "two")).unwrap();
-        until_step(&mut client);
-        let Reply::Sessions { sessions } = client.answer(&Request::Sessions) else {
-            panic!()
+        // Its message is taken, whichever the daemon hears first; then one of
+        // the two runs (AGL-134, D1).
+        loop {
+            match client.next() {
+                Reply::Ok => break,
+                reply => assert!(matches!(reply, Reply::Sent { .. }), "{reply:?}"),
+            }
+        }
+        let since = Instant::now();
+        let sessions = loop {
+            let Reply::Sessions { sessions } = client.answer(&Request::Sessions) else {
+                panic!()
+            };
+            if sessions.len() == 1 && sessions[0].busy {
+                break sessions;
+            }
+            assert!(since.elapsed() < Duration::from_secs(10), "it never ran: {sessions:?}");
+            thread::sleep(Duration::from_millis(50));
         };
         assert_eq!(sessions.len(), 1);
         assert!(sessions[0].busy && sessions[0].pids.is_empty(), "sent, and not held");
