@@ -446,10 +446,9 @@ mod tests {
         (client, project, opened)
     }
 
-    fn chunk(dir: &Path, draft: bool) -> Request {
+    fn chunk(session: &str, draft: bool) -> Request {
         Request::Transcribe {
-            dir: dir.to_string_lossy().into_owned(),
-            plane: None,
+            session: session.into(),
             audio: proto::Attached {
                 number: 1,
                 kind: proto::MediaKind::Audio,
@@ -489,9 +488,9 @@ mod tests {
     fn a_draft_with_none_set_is_refused() {
         // AGL-127, D4.
         let dir = TempDir::new();
-        let (mut client, project, opened) = opened_with(&dir, "", &[]);
+        let (mut client, _project, opened) = opened_with(&dir, "", &[]);
         assert!(!opened.drafts);
-        let Reply::Refused { error } = client.ask(&chunk(&project, true)) else {
+        let Reply::Refused { error } = client.ask(&chunk(&opened.session.id, true)) else {
             panic!("a draft was taken")
         };
         assert_eq!(error, "no draft server is set for this session's whisper");

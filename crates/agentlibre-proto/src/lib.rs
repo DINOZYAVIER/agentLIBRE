@@ -79,11 +79,10 @@ pub enum Request {
         session: String,
         lines: Vec<CommandLine>,
     },
-    /// An audio's text (D15), by the whisper of the plane of `dir` and
-    /// `plane`, as `open` names them.
+    /// An audio's text (D15), by the whisper, or the draft server when
+    /// `draft`, of the session `session` (AGL-136, D1).
     Transcribe {
-        dir: String,
-        plane: Option<String>,
+        session: String,
         audio: Attached,
         /// A chunk of a live dictation, for the draft server of the
         /// session's whisper (AGL-127, D4); not the final pass.

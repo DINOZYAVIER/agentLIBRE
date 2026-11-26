@@ -193,9 +193,9 @@ impl Daemon {
                     .collect();
                 self.plain(client, &session, Command::Append(events), lang)
             }
-            Request::Transcribe { dir, plane, audio, draft } => {
+            Request::Transcribe { session, audio, draft } => {
                 thread::spawn(move || {
-                    let reply = match self.transcribe(&dir, plane.as_deref(), audio, draft) {
+                    let reply = match self.transcribe(&session, audio, draft) {
                         Ok(text) => Reply::Transcribed { text },
                         Err(error) => Reply::Refused { error: error.message(lang) },
                     };

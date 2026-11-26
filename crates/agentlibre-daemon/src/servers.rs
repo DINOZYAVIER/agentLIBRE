@@ -28,32 +28,25 @@ fn due(idle: Duration, elapsed: Duration, busy: bool) -> bool {
 }
 
 impl Daemon {
-    /// An audio's text (D15), by the transcription of the plane of a session
-    /// open on `dir` in `plane`.
+    /// An audio's text (D15), by the transcription of the session
+    /// `session`, or refused when it is not open (AGL-136, D1).
     ///
     /// With `draft` it is a chunk of a live dictation: the draft server of
     /// the session's whisper hears it, with no warm-up and no whisper
     /// (AGL-127, D4); a session with none refuses it.
     pub(super) fn transcribe(
         &self,
-        dir: &str,
-        plane: Option<&str>,
+        session: &str,
         audio: proto::Attached,
         draft: bool,
     ) -> Result<String, Error> {
         let (voice, drafter) = {
             let state = self.lock();
-            let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
             state
                 .sessions
-                .iter()
-                .find(|(id, entry)| {
-                    state.plane_of(id).map(|held| held.file.name.as_str()) == plane
-                        && std::fs::canonicalize(&entry.opened.workspace)
-                            .is_ok_and(|workspace| workspace == dir)
-                })
-                .map(|(_, entry)| (Arc::clone(&entry.voice), entry.draft.clone()))
-                .ok_or_else(|| Error::NoTranscriber { dir: dir.clone() })?
+                .get(session)
+                .map(|entry| (Arc::clone(&entry.voice), entry.draft.clone()))
+                .ok_or_else(|| Error::NoTranscriber { id: session.into() })?
         };
         let drafter = if draft {
             Some(drafter.ok_or(Error::NoDraft)?)

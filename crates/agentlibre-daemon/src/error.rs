@@ -21,9 +21,9 @@ pub enum Error {
     Running { path: PathBuf },
     /// No session of that id is open in the daemon.
     NoSession { id: String },
-    /// `transcribe` for a directory with no session open in the daemon
-    /// (AGL-076, D15).
-    NoTranscriber { dir: PathBuf },
+    /// `transcribe` for a session that is not open in the daemon
+    /// (AGL-076, D15; AGL-136, D1).
+    NoTranscriber { id: String },
     /// `transcribe`'s audio is not base64.
     BadAudio,
     /// `transcribe` of a draft for a session whose whisper has no draft
@@ -40,7 +40,7 @@ impl Error {
             Self::NoRuntime => tr!(lang, m::DAEMON_NO_RUNTIME).to_string(),
             Self::Running { path } => tr!(lang, RUNNING, path = path.display()),
             Self::NoSession { id } => tr!(lang, NO_SESSION, id = id),
-            Self::NoTranscriber { dir } => tr!(lang, NO_TRANSCRIBER, dir = dir.display()),
+            Self::NoTranscriber { id } => tr!(lang, NO_TRANSCRIBER, id = id),
             Self::BadAudio => tr!(lang, BAD_AUDIO).to_string(),
             Self::NoDraft => tr!(lang, NO_DRAFT).to_string(),
         }
@@ -61,8 +61,8 @@ const NO_SESSION: Msg = Msg {
 
 /// `Error::NoTranscriber`.
 const NO_TRANSCRIBER: Msg = Msg {
-    en: "no session is open in the daemon for {dir}, to transcribe with its settings",
-    uk: "у демоні не відкрито жодної сесії для {dir}, щоб розпізнати з її налаштуваннями",
+    en: "no session {id} is open in the daemon, to transcribe with its settings",
+    uk: "сесія {id} не відкрита в демоні, щоб розпізнати з її налаштуваннями",
 };
 
 /// `Error::BadAudio`.

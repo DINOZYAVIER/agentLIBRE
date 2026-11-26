@@ -152,18 +152,16 @@ fn agent_session(options: &Options, args: &Args) -> Result<repl::End, ReplError>
     )?;
     let Some(message) = args.prompt.clone() else {
         // No `-p`: the interactive session (D136).
-        let plane = opened.session.plane.clone();
         let stores = Arc::new(agentlibre_surface::daemon::Stores {
             paths: options.paths.clone(),
             lang: options.lang,
             dir: opened.workspace.clone(),
-            plane: plane.clone(),
+            plane: opened.session.plane.clone(),
             function: opened.function.clone(),
         });
         let voice = Arc::new(agentlibre_surface::dictation::RemoteVoice {
             paths: options.paths.clone(),
-            dir: opened.workspace.clone(),
-            plane,
+            session: opened.session.id.clone(),
             lang: options.lang,
         });
         let setup = Setup {

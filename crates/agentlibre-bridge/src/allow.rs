@@ -78,8 +78,7 @@ mod tests {
                 answer: Some("y".into()),
             },
             Request::Transcribe {
-                dir: "/w".into(),
-                plane: None,
+                session: s(),
                 audio: audio(),
                 draft: false,
             },
@@ -103,8 +102,7 @@ mod tests {
     fn a_chunk_of_a_draft_is_not_for_a_device() {
         // AGL-127, D5: the final pass goes on, the draft does not.
         let transcribe = |draft| Request::Transcribe {
-            dir: "/w".into(),
-            plane: None,
+            session: "s".into(),
             audio: audio(),
             draft,
         };

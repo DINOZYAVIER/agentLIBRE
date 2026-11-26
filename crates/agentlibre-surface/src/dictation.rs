@@ -126,8 +126,7 @@ pub fn compose(confirmed: &str, drafts: &[(u64, String)], upto: u64) -> String {
 /// of its own.
 pub struct RemoteVoice {
     pub paths: Paths,
-    pub dir: String,
-    pub plane: Option<String>,
+    pub session: String,
     pub lang: Lang,
 }
 
@@ -148,8 +147,7 @@ impl Dictation for RemoteVoice {
     ) -> Result<String, Error> {
         let client = connect(&self.paths, false, self.lang, true)?;
         let request = Request::Transcribe {
-            dir: self.dir.clone(),
-            plane: self.plane.clone(),
+            session: self.session.clone(),
             audio: proto::Attached {
                 number: 1,
                 kind: proto::MediaKind::Audio,
@@ -174,8 +172,7 @@ impl Dictation for RemoteVoice {
 /// does, and the worker's one thread keeps their order.
 pub struct RemoteDraft {
     pub paths: Paths,
-    pub dir: String,
-    pub plane: Option<String>,
+    pub session: String,
     pub lang: Lang,
 }
 
@@ -183,8 +180,7 @@ impl DraftEngine for RemoteDraft {
     fn transcribe(&self, wav: &[u8]) -> Result<String, Error> {
         let client = connect(&self.paths, false, self.lang, true)?;
         let request = Request::Transcribe {
-            dir: self.dir.clone(),
-            plane: self.plane.clone(),
+            session: self.session.clone(),
             audio: proto::Attached {
                 number: 1,
                 kind: proto::MediaKind::Audio,

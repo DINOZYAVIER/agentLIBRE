@@ -75,8 +75,7 @@ fn every_request_round_trips_as_one_line() {
             }],
         },
         Request::Transcribe {
-            dir: "/w".into(),
-            plane: None,
+            session: "s".into(),
             audio: Attached {
                 number: 1,
                 kind: MediaKind::Audio,
@@ -87,8 +86,7 @@ fn every_request_round_trips_as_one_line() {
             draft: false,
         },
         Request::Transcribe {
-            dir: "/w".into(),
-            plane: Some("work".into()),
+            session: "s2".into(),
             audio: Attached {
                 number: 1,
                 kind: MediaKind::Audio,
@@ -344,8 +342,7 @@ fn a_draft_is_said_only_when_it_is_so() {
         base64: String::new(),
     };
     let transcribe = |draft| Request::Transcribe {
-        dir: "/w".into(),
-        plane: None,
+        session: "s".into(),
         audio: audio.clone(),
         draft,
     };
@@ -359,8 +356,8 @@ fn a_draft_is_said_only_when_it_is_so() {
     let (line, back) = round(&Reply::Opened(Opened { drafts: true, ..Opened::default() }));
     assert!(line.contains("\"drafts\":true"), "{line}");
     assert!(matches!(back, Reply::Opened(Opened { drafts: true, .. })));
-    // A line of the old shape, with neither, reads as no draft.
-    let old = r#"{"request":"transcribe","dir":"/w","plane":null,"audio":{"number":1,"kind":"audio","name":"v.wav","ext":"wav","base64":""}}"#;
+    // A line with no `draft` reads as no draft.
+    let old = r#"{"request":"transcribe","session":"s","audio":{"number":1,"kind":"audio","name":"v.wav","ext":"wav","base64":""}}"#;
     let read: Request = serde_json::from_str(old).unwrap();
     assert!(matches!(read, Request::Transcribe { draft: false, .. }));
 }

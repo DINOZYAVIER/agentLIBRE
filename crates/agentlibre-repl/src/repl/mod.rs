@@ -1225,8 +1225,7 @@ pub fn run(setup: Setup) -> Result<End, Error> {
     let draft: Option<Arc<dyn DraftEngine>> = opened.drafts.then(|| {
         Arc::new(agentlibre_surface::dictation::RemoteDraft {
             paths: paths.clone(),
-            dir: opened.workspace.clone(),
-            plane: opened.session.plane.clone(),
+            session: opened.session.id.clone(),
             lang,
         }) as Arc<dyn DraftEngine>
     });
