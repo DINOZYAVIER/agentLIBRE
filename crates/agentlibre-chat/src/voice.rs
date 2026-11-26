@@ -22,9 +22,12 @@ pub enum Mode {
 }
 
 /// A recording under way, and what its text does.
+type Under = Option<(Box<dyn Recording>, Mode)>;
+
+/// The microphone of the window.
 #[derive(Default, Clone)]
 pub struct Voice {
-    recording: Rc<RefCell<Option<(Box<dyn Recording>, Mode)>>>,
+    recording: Rc<RefCell<Under>>,
 }
 
 /// What a press of Ctrl-R or Alt-R did.

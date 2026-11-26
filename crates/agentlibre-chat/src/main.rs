@@ -1,9 +1,9 @@
 //! `agl-chat` (AGL-073): agentLIBRE's chat, a window drawn by katarsa and a
-//! client of `agl daemon` (D5). It opens a session in the current directory
-//! as `agl` does, shows its past (D10), and its turns as they go: the answer
-//! as it arrives, a tool call or a stop a dim line (D9). Enter sends,
-//! Shift+Enter breaks a line, Escape or Stop stops the turn; a plane's yes
-//! or no question has two buttons (D11).
+//! client of `agl daemon` (D5), with the REPL's features (AGL-128). It opens a
+//! session in the current directory as `agl` does, the directory's sessions at
+//! its left; it draws the records the REPL draws, as they come; its field takes
+//! the REPL's commands, offered by a menu, and its keys; a plane's yes or no
+//! question has two buttons (D11).
 
 use std::cell::RefCell;
 use std::process::ExitCode;
@@ -35,28 +35,45 @@ use katarsa_wayland::WindowConfig;
 
 
 const HELP_EN: &str = "\
-Usage: agl-chat [--resume <id|name|last>] [--plane <name>] [--function <name>]
+Usage: agl-chat [--resume [<id|name|last>]] [--plane <name>] [--function <name>]
+                [--think <level>] [--yes]
 
 agentLIBRE's chat: a window on a session of agl daemon, in the current
-directory, as agl opens one. Enter sends, Shift+Enter breaks a line, Escape
-or Stop stops the turn. The daemon is started when none runs.
+directory, as agl opens one; the sessions of the directory are at its left.
+The daemon is started when none runs.
 
-  --resume <id|name|last>  go on with a session; its past shows
-  --plane <name>           the session in that plane
-  --function <name>        a new session with that Function
-  -h, --help               this help";
+Keys of the field: Enter sends, Shift+Enter breaks a line; / opens the menu
+of the commands, the arrows pick one, Enter takes it; Up at the first line
+recalls the messages sent; Ctrl-R records the microphone and sends the text,
+Alt-R puts it in the line; Ctrl-V attaches a picture or files; Ctrl-O shows
+the session in full; Escape leaves that view, or stops the turn.
+
+  --resume [<id|name|last>]  go on with a session; with no id, list them
+  --plane <name>             the session in that plane
+  --function <name>          a new session with that Function
+  --think <level>            the reasoning level: off, low, medium or xhigh
+  --yes                      agree to restart the server without asking
+  -h, --help                 this help";
 
 const HELP_UK: &str = "\
-Використання: agl-chat [--resume <id|назва|last>] [--plane <назва>] [--function <назва>]
+Використання: agl-chat [--resume [<id|назва|last>]] [--plane <назва>] [--function <назва>]
+                       [--think <рівень>] [--yes]
 
 Чат agentLIBRE: вікно на сесію agl daemon у поточній теці, як її відкриває
-agl. Enter надсилає, Shift+Enter переносить рядок, Escape або Зупинити
-зупиняє хід. Демон запускається, коли жоден не працює.
+agl; сесії теки зліва. Демон запускається, коли жоден не працює.
 
-  --resume <id|назва|last>  продовжити сесію; її минуле показується
-  --plane <назва>           сесія в цьому плані
-  --function <назва>        нова сесія з цією Function
-  -h, --help                ця довідка";
+Клавіші поля: Enter надсилає, Shift+Enter переносить рядок; / відкриває меню
+команд, стрілки вибирають, Enter бере; Up на першому рядку повертає надіслані
+повідомлення; Ctrl-R записує мікрофон і надсилає текст, Alt-R ставить його в
+рядок; Ctrl-V прикріплює картинку чи файли; Ctrl-O показує сесію повністю;
+Escape виходить із цього вигляду або зупиняє хід.
+
+  --resume [<id|назва|last>]  продовжити сесію; без id — список
+  --plane <назва>             сесія в цьому плані
+  --function <назва>          нова сесія з цією Function
+  --think <рівень>            рівень міркувань: off, low, medium або xhigh
+  --yes                       погодитися на перезапуск сервера без питання
+  -h, --help                  ця довідка";
 
 /// What the command line asks: the REPL's launch flags (AGL-128, D2).
 #[derive(Debug, Default, PartialEq)]
@@ -992,7 +1009,7 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
             true
         });
         // Ctrl-V of a picture or of files attaches them (D2; KS-052).
-        let attach_file = attach_file.clone();
+        let attach_file = attach_file;
         cx.on_paste(field, move |pasted| match pasted {
             Pasted::Image { mime, bytes } => {
                 let ext = mime.strip_prefix("image/").unwrap_or("png").to_owned();
@@ -1241,18 +1258,18 @@ fn tool(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize) {
             Record::Tool { result, .. } => result.as_ref().map(|result| result.content.clone()),
             _ => None,
         });
-        let text_shown = text.clone();
+        let text_shown = text;
         cx.show(Sty::column(), move || !text_shown().is_empty(), move |cx| {
-            cx.markdown(Sty::column().gap(6.0), prop(text.clone()));
+            cx.markdown(Sty::column().gap(6.0), prop(text));
         });
         let node = cx.group(Sty::column(), move |cx| {
-            cx.paragraph(prop(input.clone()), Tone::Normal);
+            cx.paragraph(prop(input), Tone::Normal);
         });
         cx.class(node, "markdown.code");
-        let output_shown = output.clone();
+        let output_shown = output;
         cx.show(Sty::column(), move || !output_shown().is_empty(), move |cx| {
             let node = cx.group(Sty::column(), |cx| {
-                cx.paragraph(prop(output.clone()), Tone::Normal);
+                cx.paragraph(prop(output), Tone::Normal);
             });
             cx.class(node, "markdown.code");
         });

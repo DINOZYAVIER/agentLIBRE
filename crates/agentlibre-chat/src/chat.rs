@@ -124,7 +124,7 @@ impl Chat {
         self.writing = None;
         match &done.turn {
             Some(Ok(TurnEnd::Stopped(StopReason::Interrupted))) => {
-                self.note(&tr!(self.lang, m::INTERRUPTED).to_string(), Role::Muted);
+                self.note(tr!(self.lang, m::INTERRUPTED), Role::Muted);
             }
             Some(Ok(TurnEnd::Stopped(_))) => {
                 if let Some(why) = &done.why {

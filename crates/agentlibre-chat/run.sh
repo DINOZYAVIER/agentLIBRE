@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # agl-chat (AGL-073): agentLIBRE's chat for the directory you are in.
 #
-#   agl-chat [--resume <id|name|last>] [--plane <name>] [--function <name>]
+#   agl-chat [--resume [<id|name|last>]] [--plane <name>] [--function <name>]
+#            [--think <level>] [--yes]
 #   agl-chat --stop
 #
 # Builds the new agl and the chat when they are out of date, starts the
@@ -23,8 +24,13 @@ if [ "${1:-}" = "--stop" ]; then
   exit 0
 fi
 
-# 1. The new agl, from the checkout (the installed one has no daemon).
+# 1. The new agl, from the checkout (the installed one has no daemon), and
+#    the variables its dev shell sets, with which the chat reads the user's
+#    settings as agl does.
 (cd "$AGL" && nix develop --command cargo build -q)
+eval "$(cd "$AGL" && nix develop --command bash -c \
+  'printf "export AGENTLIBRE_TOOLS=%q AGENTLIBRE_FUNCTIONS=%q AGENTLIBRE_NIX=%q\n" \
+     "$AGENTLIBRE_TOOLS" "$AGENTLIBRE_FUNCTIONS" "$AGENTLIBRE_NIX"' 2>/dev/null)"
 
 # 2. A daemon answering on its socket; one that answers already is kept.
 mkdir -p "$LOG"
