@@ -48,7 +48,7 @@ pub enum Error {
     UnknownKey {
         path: PathBuf,
         key: String,
-        allowed: Vec<&'static str>,
+        allowed: Vec<String>,
     },
     /// A required key is missing.
     MissingKey { path: PathBuf, key: String },

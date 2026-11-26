@@ -67,12 +67,12 @@ impl Section {
     }
 
     /// Rejects a key outside `allowed`.
-    pub fn check_keys(&self, allowed: &[&'static str]) -> Result<(), Error> {
+    pub fn check_keys(&self, allowed: &[&str]) -> Result<(), Error> {
         match self.map.keys().find(|key| !allowed.contains(&key.as_str())) {
             Some(key) => Err(crate::nix::Error::UnknownKey {
                 path: self.path.clone(),
                 key: self.key(key),
-                allowed: allowed.to_vec(),
+                allowed: allowed.iter().map(|key| key.to_string()).collect(),
             }
             .into()),
             None => Ok(()),
@@ -200,6 +200,12 @@ impl Section {
                 .map(Some),
             Some(_) => Err(self.wrong_type(key, Expected::Tables)),
         }
+    }
+
+    /// Takes the value `key` as it is, if present: a value whose type
+    /// another key decides (AGL-124: a field's `default`, of its kind).
+    pub fn raw(&mut self, key: &str) -> Option<Value> {
+        self.map.remove(key)
     }
 
     /// Takes every remaining key as a set, in key order.
