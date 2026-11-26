@@ -1770,6 +1770,37 @@ fn an_image_without_a_projector_is_an_error_that_says_so() {
 }
 
 #[test]
+fn a_medium_the_server_cannot_take_runs_in_an_earlier_message() {
+    // AGL-137, D1: only the newest message, whose medium the server cannot
+    // take, fails; a later message runs with that medium as a text.
+    let dir = TempDir::new();
+    let mut first = Script::new(&[]);
+    first.marker = None;
+    let mut session = Session::create(&dir.0.join("sessions"), "f", &dir.0).unwrap();
+    session
+        .store_media(&source(agentlibre_common::media::Kind::Image, b"IMG", "png"), 1, None)
+        .unwrap();
+    assert!(matches!(
+        turn_in(&mut session, &first, &dir, "[Image#1]"),
+        Err(Error::Backend(crate::backend::error::Error::NoMultimodal))
+    ));
+    // The next message runs; its prompt holds the text in place of [Image#1].
+    let mut next = Script::new(&[("Hm.", THOUGHT), ("Ok.", Stop::End)]);
+    next.marker = None;
+    assert!(turn_in(&mut session, &next, &dir, "plain").is_ok());
+    assert!(
+        next.users.borrow()[0]
+            .contains("[Image#1: the server has no multimodal projector, so it cannot take images]"),
+        "{:?}",
+        next.users.borrow()
+    );
+    // D2: a server with a projector again gets the marker for that image.
+    let again = Script::new(&[("Hm.", THOUGHT), ("Ok.", Stop::End)]);
+    assert!(turn_in(&mut session, &again, &dir, "again").is_ok());
+    assert!(again.users.borrow()[0].contains("<__media_TEST__>"));
+}
+
+#[test]
 fn a_changed_copy_of_a_medium_stops_the_turn_with_its_name() {
     let dir = TempDir::new();
     let script = Script::new(&[]);
