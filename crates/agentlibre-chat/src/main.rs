@@ -6,7 +6,9 @@
 //! question has two buttons (D11).
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::sync::Arc;
 
 mod chat;
@@ -28,7 +30,7 @@ use agentlibre_surface::{attach, words};
 use chat::Chat;
 use katarsa_app::App;
 use katarsa_reactive::signal;
-use katarsa_ui::reactive::{Pasted, Ui, prop};
+use katarsa_ui::reactive::{Cx, Pasted, Ui, prop};
 use katarsa_ui::{Key, KeyInput};
 use katarsa_ui::retained::{Sty, Tone};
 use katarsa_wayland::WindowConfig;
@@ -284,6 +286,7 @@ fn run(args: Args, lang: Lang) -> Result<bool, Box<dyn std::error::Error>> {
                     }
                     counts.set(opened.session.media);
                     drafts.set(opened.drafts);
+                    chat.update(|chat| chat.opened(&opened));
                     pending.set(Vec::new());
                     let id = opened.session.id;
                     session.set(Some(id.clone()));
@@ -661,17 +664,10 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
             }
         }
     };
-    // Escape leaves the inspect view first, then stops the turn.
-    let inspect = signal(false);
+    // Escape stops the turn.
     {
         let stop = stop.clone();
-        ui.on_cancel(move || {
-            if inspect.get() {
-                inspect.set(false);
-            } else {
-                stop();
-            }
-        });
+        ui.on_cancel(stop);
     }
     let answer = {
         let out = Arc::clone(out);
@@ -920,6 +916,12 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
                 .collect::<Vec<_>>()
         })
     };
+    // The level of detail the whole chat shows (AGL-139, D5): it starts at
+    // `repl.thinking` and the button under the field goes round the three;
+    // what the human opens by hand goes against it, and a new level forgets
+    // those clicks.
+    let level = signal(repl.thinking);
+    let clicks = signal(HashMap::<(usize, char), bool>::new());
     // What the copy buttons copy through (KS-041 D3).
     let copier = ui.clone();
     ui.mount(move |cx| {
@@ -1068,6 +1070,42 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
             },
             submit,
         );
+        // The row under the field, as the REPL's dock (AGL-139, D1): what
+        // runs the session, the phase and its time, the speed of what is
+        // being decoded, and the button of the level of detail (D5).
+        cx.group(Sty::row().gap(12.0), move |cx| {
+            let read = |what: fn(&Chat) -> String| prop(move || chat.with(what));
+            let node = cx.label(read(|chat| chat.dock().function.clone()), Tone::Normal);
+            cx.class(node, "chat.dock");
+            let node = cx.label(read(|chat| chat.dock().usage()), Tone::Normal);
+            cx.class(node, "chat.usage");
+            let node = cx.label(
+                prop(move || {
+                    chat.with(|chat| {
+                        let dock = chat.dock();
+                        let label = dock.phase_label(lang);
+                        match dock.phase_time().filter(|_| dock.phase != Phase::Ready) {
+                            Some(time) => format!("{label} \u{b7} {}", words::duration(time.as_secs())),
+                            None => label,
+                        }
+                    })
+                }),
+                Tone::Normal,
+            );
+            cx.class(node, "chat.activity");
+            let node = cx.label(
+                prop(move || {
+                    chat.with(|chat| chat.dock().speed().map_or_else(String::new, |speed| words::speed(speed, lang)))
+                }),
+                Tone::Dim,
+            );
+            cx.class(node, "chat.usage");
+            let button = cx.button("detail", prop(move || level_word(level.get()).to_owned()), move || {
+                level.update(|level| *level = next_level(*level));
+                clicks.set(HashMap::new());
+            });
+            cx.class(button, "fold");
+        });
         let pick = {
             let menu = menu.clone();
             move || shown.get().get(menu_pick.get()).map(|&at| menu[at].0)
@@ -1171,11 +1209,82 @@ fn build(out: &Arc<Client>, state: State) -> Ui {
     ui
 }
 
-/// The record `at`, as the transcript draws it (AGL-066): a message, a
-/// line, a call folded with its result (KS-042), an answer in Markdown with a
-/// button that copies its source (KS-041 D3).
-fn record(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, copier: &Ui, detail: Detail, lang: Lang) {
-    let Some(kind) = record_at(chat, at, |record| match record {
+/// What drawing a record needs (AGL-139, D4, D5).
+#[derive(Clone)]
+struct Draw {
+    chat: Signal<Chat>,
+    /// What the copy buttons copy through (KS-041 D3).
+    copier: Ui,
+    /// The level of detail the whole chat shows, from `repl.thinking` (D5).
+    level: Signal<Detail>,
+    /// The blocks the human opened or closed by hand, by their key: until a
+    /// block is here, its state follows the level (D5).
+    clicks: Signal<HashMap<(usize, char), bool>>,
+    lang: Lang,
+}
+
+/// The word of a level of detail (AGL-139, D5): the name `repl.thinking`
+/// takes, the same in either language.
+fn level_word(level: Detail) -> &'static str {
+    match level {
+        Detail::Off => "off",
+        Detail::Flexible => "flexible",
+        Detail::Full => "full",
+    }
+}
+
+/// The level a button going round the three gives after this one (AGL-139,
+/// D5).
+fn next_level(level: Detail) -> Detail {
+    match level {
+        Detail::Off => Detail::Flexible,
+        Detail::Flexible => Detail::Full,
+        Detail::Full => Detail::Off,
+    }
+}
+
+/// A block that opens and closes (AGL-139, D5): katarsa's fold, but its
+/// state is the level's until the human clicks its header, and the click
+/// opens or folds at any level.
+fn block(
+    cx: &mut Cx,
+    id: &'static str,
+    key: (usize, char),
+    header: impl Fn() -> String + 'static,
+    d: Draw,
+    follows: impl Fn() -> bool + 'static,
+    build: impl Fn(&mut Cx) + 'static,
+) {
+    let open = {
+        let d = d.clone();
+        Rc::new(move || d.clicks.get().get(&key).copied().unwrap_or_else(&follows))
+    };
+    let press = {
+        let open = Rc::clone(&open);
+        move || {
+            let now = !open();
+            d.clicks.update(|clicks| {
+                clicks.insert(key, now);
+            });
+        }
+    };
+    let text = {
+        let open = Rc::clone(&open);
+        prop(move || {
+            let marker = if open() { "\u{25be}" } else { "\u{25b8}" };
+            format!("{marker} {}", header())
+        })
+    };
+    let node = cx.button(id, text, press);
+    cx.class(node, "fold");
+    cx.show(Sty::column().gap(6.0), move || open(), build);
+}
+
+/// The record `at`, as the block the human chose (AGL-139, D4): the message,
+/// the thinking behind a "thought Ns" button, the answer in Markdown with its
+/// copy button and its row, a call behind "TOOL name · status · time".
+fn record(cx: &mut Cx, at: usize, d: Draw) {
+    let Some(kind) = record_at(d.chat, at, |record| match record {
         Record::User(_) => 0,
         Record::Wake { .. } => 1,
         Record::State(_) => 2,
@@ -1185,7 +1294,7 @@ fn record(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, copi
     }) else {
         return;
     };
-    let read = move |read: fn(&Record) -> String| prop(move || record_at(chat, at, read).unwrap_or_default());
+    let read = move |read: fn(&Record) -> String| prop(move || record_at(d.chat, at, read).unwrap_or_default());
     match kind {
         0 => {
             cx.label("you", Tone::Dim);
@@ -1211,21 +1320,21 @@ fn record(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, copi
             }), Tone::Dim);
         }
         3 => {
-            thinking(cx, chat, at, detail, lang);
-            tool(cx, chat, at);
+            thinking(cx, at, d.clone());
+            tool(cx, at, d.clone());
         }
         4 => {
-            thinking(cx, chat, at, detail, lang);
+            thinking(cx, at, d.clone());
             let text = read(|record| match record {
                 Record::Answer { text, .. } => text.clone(),
                 _ => String::new(),
             });
             cx.markdown(Sty::column().gap(6.0), text);
-            let ui = copier.clone();
+            let ui = d.copier.clone();
             cx.group(Sty::row(), move |cx| {
                 let ui = ui.clone();
                 let button = cx.button("copy", "copy", move || {
-                    if let Some(source) = record_at(chat, at, |record| match record {
+                    if let Some(source) = record_at(d.chat, at, |record| match record {
                         Record::Answer { text, .. } => text.clone(),
                         _ => String::new(),
                     }) {
@@ -1235,9 +1344,19 @@ fn record(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, copi
                 // A quiet button, as a fold's header.
                 cx.class(button, "fold");
             });
+            // The row under the answer (AGL-139, D6): its turn's phases and
+            // their times, the time it took, its tokens and their speed.
+            let chat = d.chat;
+            cx.show(
+                Sty::row(),
+                move || chat.with(|chat| chat.turn_row(at).is_some()),
+                move |cx| {
+                    cx.label(prop(move || chat.with(|chat| chat.turn_row(at).unwrap_or_default())), Tone::Dim);
+                },
+            );
         }
         _ => {
-            let failed = record_at(chat, at, |record| {
+            let failed = record_at(d.chat, at, |record| {
                 matches!(record, Record::Notice { role: Role::StatusFailure, .. })
             }) == Some(true);
             let node = cx.paragraph(read(|record| match record {
@@ -1251,116 +1370,59 @@ fn record(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, copi
     }
 }
 
-/// The thinking of the step of the record `at`, as `repl.thinking` says
-/// (D4, D7): `off` none of it, `flexible` folded to its time, `full` open.
-fn thinking(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize, detail: Detail, lang: Lang) {
+/// The thinking of the step of the record `at` (AGL-139, D4, D5): `off` none
+/// of it, else a "thought Ns" button that opens it, open at `full` and
+/// folded to its time at `flexible` until the human clicks it.
+fn thinking(cx: &mut Cx, at: usize, d: Draw) {
     let text = move || {
-        record_at(chat, at, |record| match record {
+        record_at(d.chat, at, |record| match record {
             Record::Answer { thinking, .. } | Record::Tool { thinking, .. } => thinking.clone(),
             _ => None,
         })
         .flatten()
     };
-    if detail == Detail::Off || text().is_none() {
-        return;
-    }
-    let header = prop(move || {
-        let time = chat.with(|chat| chat.thinking_time(at));
-        let word = if lang == Lang::Uk { "думав" } else { "thought" };
-        match time {
-            Some(time) => format!("{word} {}", words::duration(time.as_secs().max(1))),
-            None => word.to_owned(),
-        }
-    });
-    let body = move || prop(move || text().unwrap_or_default());
-    if detail == Detail::Full {
-        cx.label(header, Tone::Dim);
-        cx.paragraph(body(), Tone::Dim);
-    } else {
-        cx.fold("thinking", header, move |cx| {
-            cx.paragraph(body(), Tone::Dim);
-        });
-    }
-}
-
-/// The record `at` in full, as the REPL's inspect mode shows it (AGL-066,
-/// D4): every part, the call's phases and their times.
-fn inspected(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize) {
-    let parts = record_at(chat, at, |record| -> Vec<(String, bool)> {
-        // Each part: its text, and whether it is a heading.
-        let mut parts = Vec::new();
-        match record {
-            Record::User(text) => parts.push((format!("\u{203a} {text}"), false)),
-            Record::Wake { flow, text } => parts.push((format!("wake {flow}: {text}"), false)),
-            Record::State(state) => parts.push((format!("[{state}]"), true)),
-            Record::Tool { call, result, phases, thinking, text, .. } => {
-                if let Some(thinking) = thinking {
-                    parts.push(("THINKING".into(), true));
-                    parts.push((thinking.clone(), false));
+    let level = d.level;
+    cx.show(
+        Sty::column(),
+        move || level.get() != Detail::Off && text().is_some(),
+        move |cx| {
+            let chat = d.chat;
+            let lang = d.lang;
+            let header = move || {
+                let time = chat.with(|chat| chat.thinking_time(at));
+                let word = if lang == Lang::Uk { "думав" } else { "thought" };
+                match time {
+                    Some(time) => format!("{word} {}", words::duration(time.as_secs().max(1))),
+                    None => word.to_owned(),
                 }
-                if let Some(text) = text.as_ref().filter(|text| !text.trim().is_empty()) {
-                    parts.push((text.clone(), false));
-                }
-                let (status, _) = records::status(result.as_ref().map(|result| result.outcome));
-                let times = records::phase_items(phases).join(" · ");
-                parts.push((format!("TOOL {} · {status} {times}", call.name), true));
-                parts.push((records::call_input(call), false));
-                if let Some(result) = result {
-                    parts.push(("RESULT".into(), true));
-                    parts.push((result.content.clone(), false));
-                }
-            }
-            Record::Answer { text, thinking, .. } => {
-                if let Some(thinking) = thinking {
-                    parts.push(("THINKING".into(), true));
-                    parts.push((thinking.clone(), false));
-                }
-                parts.push(("ANSWER".into(), true));
-                parts.push((text.clone(), false));
-            }
-            Record::Notice { line, detail, .. } => {
-                parts.push((line.clone(), true));
-                if let Some(detail) = detail {
-                    parts.push((detail.clone(), false));
-                }
-            }
-        }
-        parts
-    })
-    .unwrap_or_default();
-    for (text, heading) in parts {
-        // A paragraph, not a label: a line of the session may be many
-        // (`/help`), and a label is one line high.
-        if heading {
-            cx.paragraph(text, Tone::Dim);
-        } else {
-            let node = cx.group(Sty::column(), move |cx| {
-                cx.paragraph(text.clone(), Tone::Normal);
+            };
+            let level = d.level;
+            block(cx, "thinking", (at, 't'), header, d.clone(), move || level.get() == Detail::Full, move |cx| {
+                cx.paragraph(prop(move || text().unwrap_or_default()), Tone::Dim);
             });
-            cx.class(node, "markdown.code");
-        }
-    }
+        },
+    );
 }
 
-/// A call as a fold (KS-042): its header the outcome and the line of what it
-/// did, its body the thinking and the text before it, its input in full and
-/// its result.
-fn tool(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize) {
-    let header = prop(move || {
-        record_at(chat, at, |record| match record {
-            Record::Tool { call, result, hint, .. } => {
+/// A call as a block (AGL-139, D4): "TOOL name · status · time", opening on
+/// what the model wrote before it, on its input and on its result.
+fn tool(cx: &mut Cx, at: usize, d: Draw) {
+    let header = {
+        let chat = d.chat;
+        move || record_at(chat, at, |record| match record {
+            Record::Tool { call, result, phases, .. } => {
                 let (status, _) = records::status(result.as_ref().map(|result| result.outcome));
-                let what = if hint.is_empty() { call.name.clone() } else { format!("{} {hint}", call.name) };
-                format!("{what} · {status}")
+                let times = records::phase_items(phases).join(" \u{b7} ");
+                format!("TOOL {} \u{b7} {status} {times}", call.name)
             }
             _ => String::new(),
         })
         .unwrap_or_default()
-    });
-    cx.fold("call", header, move |cx| {
-        let part = move |read: fn(&Record) -> Option<String>| {
-            move || record_at(chat, at, read).flatten().unwrap_or_default()
-        };
+    };
+    let level = d.level;
+    block(cx, "call", (at, 'c'), header, d.clone(), move || level.get() == Detail::Full, move |cx| {
+        let chat = d.chat;
+        let part = move |read: fn(&Record) -> Option<String>| move || record_at(chat, at, read).flatten().unwrap_or_default();
         let text = part(|record| match record {
             Record::Tool { text, .. } => text.clone(),
             _ => None,
@@ -1383,6 +1445,8 @@ fn tool(cx: &mut katarsa_ui::reactive::Cx, chat: Signal<Chat>, at: usize) {
         cx.class(node, "markdown.code");
         let output_shown = output;
         cx.show(Sty::column(), move || !output_shown().is_empty(), move |cx| {
+            // A paragraph, not a label: a result's line may be many.
+            cx.paragraph("RESULT", Tone::Dim);
             let node = cx.group(Sty::column(), |cx| {
                 cx.paragraph(prop(output), Tone::Normal);
             });

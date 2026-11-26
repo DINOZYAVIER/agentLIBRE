@@ -76,7 +76,13 @@ pub fn styles(user: &[(Role, Spec)]) -> Sheet {
         .define("chat.field", field)
         .define("chat.button", control(Style::builder()))
         // A line that failed, as the REPL's `status_failure`.
-        .define("chat.failure", with_text(Style::builder(), Role::StatusFailure));
+        .define("chat.failure", with_text(Style::builder(), Role::StatusFailure))
+        // The row under the field, in the roles of the REPL's dock (D1):
+        // the Function as a tool, the usage as the text, the phase as the
+        // activity.
+        .define("chat.dock", with_text(Style::builder(), Role::Tool))
+        .define("chat.usage", with_text(Style::builder(), Role::InputText))
+        .define("chat.activity", with_text(Style::builder(), Role::Activity));
     // The headings of Markdown and its code block.
     if let Some(color) = text(Role::MarkdownHeading) {
         for name in ["markdown.h1", "markdown.h2", "markdown.h3"] {
