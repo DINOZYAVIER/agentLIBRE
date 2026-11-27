@@ -1419,7 +1419,7 @@ fn thinking(cx: &mut Cx, at: usize, d: Draw) {
             let lang = d.lang;
             let header = move || {
                 let time = chat.with(|chat| chat.thinking_time(at));
-                let word = if lang == Lang::Uk { "думав" } else { "thought" };
+                let word = tr!(lang, m::THOUGHT);
                 match time {
                     Some(time) => format!("{word} {}", words::duration(time.as_secs().max(1))),
                     None => word.to_owned(),

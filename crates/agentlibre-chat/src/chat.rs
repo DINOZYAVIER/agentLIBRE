@@ -90,16 +90,6 @@ impl Dock {
     }
 }
 
-/// The line that says the server answered and what its context is (AGL-139,
-/// D2); the catalog has none of its own.
-fn server_answered(size: usize, lang: Lang) -> String {
-    let size = grouped(size);
-    match lang {
-        Lang::Uk => format!("сервер відповів: контекст {size}"),
-        Lang::En => format!("the server answered: {size} of context"),
-    }
-}
-
 /// What a turn keeps for the row under its answer (AGL-139, D6).
 #[derive(Clone, Debug, Default)]
 struct Turn {
@@ -268,7 +258,7 @@ impl Chat {
             Sent::Line(line) => self.note(line, Role::Muted),
             Sent::Context(size) => {
                 self.dock.context = Some(*size);
-                let line = server_answered(*size, self.lang);
+                let line = tr!(self.lang, m::SERVER_ANSWERED, size = grouped(*size)).to_string();
                 self.note(&line, Role::Muted);
             }
             Sent::Report(report) => match report {

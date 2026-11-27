@@ -1664,6 +1664,20 @@ Forge (сховище артефактів робочої області, agentL
         uk: "Працював {time}",
     };
 
+    /// The header of a step's thinking in the chat, before its time
+    /// (AGL-139, D4).
+    pub const THOUGHT: Msg = Msg {
+        en: "thought",
+        uk: "думав",
+    };
+
+    /// The chat's line when the model's server answered, with its context
+    /// (AGL-139, D2).
+    pub const SERVER_ANSWERED: Msg = Msg {
+        en: "the server answered: {size} of context",
+        uk: "сервер відповів: контекст {size}",
+    };
+
     /// The tokens before and after a compaction, on its row (AGL-046, D13).
     pub const COMPACTED_TOKENS: Msg = Msg {
         en: "{before} → {after} tokens",
