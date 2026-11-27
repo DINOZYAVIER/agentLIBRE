@@ -7,7 +7,7 @@ resolver = "3"
 # One version for both crates: `about::version` reads it in the core and
 # shows what it shows today (AGL-067, D2).
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "LGPL-3.0-or-later"
 publish = false

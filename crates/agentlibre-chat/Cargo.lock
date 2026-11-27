@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agentlibre-chat"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agentlibre-client",
  "agentlibre-common",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "agentlibre-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agentlibre-proto",
  "libc",
@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "agentlibre-common"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "serde_json",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "agentlibre-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.23.1",
  "serde",
@@ -50,7 +50,7 @@ dependencies = [
 
 [[package]]
 name = "agentlibre-surface"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "agentlibre-client",
  "agentlibre-common",
