@@ -334,12 +334,35 @@ fn step_phases(
         if line.from == "Running" {
             run = Some(run.unwrap_or(Duration::ZERO) + time);
         }
-        match spans.iter_mut().find(|span| span.label == label) {
-            Some(span) => span.time += time,
-            None => spans.push(PhaseSpan { label, time }),
-        }
+        add_phase(&mut spans, label, time);
     }
     (spans, run)
+}
+
+/// The phases of the turn `turn` and their times, from the session's file
+/// (AGL-139, D6): summed by phase, in the order spent; a tool's phase by
+/// the tool its line names.
+pub fn turn_phases(turn: usize, transitions: &[PhaseTime], lang: Lang) -> Vec<PhaseSpan> {
+    let mut spans: Vec<PhaseSpan> = Vec::new();
+    for line in transitions {
+        if line.turn != turn || line.from == "Ready" {
+            continue;
+        }
+        let tool = line.tool.as_deref().unwrap_or_default();
+        if let Some(label) = phase_label(&line.from, tool, lang) {
+            add_phase(&mut spans, label, Duration::from_millis(line.ms));
+        }
+    }
+    spans
+}
+
+/// `time` spent in the phase `label`: added to its span, or a new span
+/// after the others (AGL-139, D6).
+pub fn add_phase(spans: &mut Vec<PhaseSpan>, label: String, time: Duration) {
+    match spans.iter_mut().find(|span| span.label == label) {
+        Some(span) => span.time += time,
+        None => spans.push(PhaseSpan { label, time }),
+    }
 }
 
 /// The fold of a session's events into records (AGL-066; AGL-127, D3): one
@@ -376,6 +399,11 @@ impl Fold {
             state_entered: false,
             pending_thinking: None,
         }
+    }
+
+    /// The number of the turn folded last, from 1; 0 before the first.
+    pub fn turn(&self) -> usize {
+        self.turn
     }
 
     /// The records so far.
@@ -566,6 +594,24 @@ mod tests {
             tokens: None,
             tool: None,
         }
+    }
+
+    #[test]
+    fn a_turn_s_phases_sum_by_phase_in_the_order_spent() {
+        let mut lines = vec![
+            line(1, 1, "Prefill", 1000),
+            line(1, 1, "Thinking", 2000),
+            line(1, 2, "Prefill", 500),
+            line(2, 1, "Prefill", 9000),
+            line(1, 2, "Ready", 9000),
+        ];
+        lines.push(PhaseTime { tool: Some("bash".into()), ..line(1, 1, "Running", 3000) });
+        let spans = turn_phases(1, &lines, Lang::En);
+        let items = phase_items(&spans);
+        assert_eq!(items.len(), 3, "{items:?}");
+        assert!(items[0].ends_with(" 1s"), "{items:?}");
+        assert!(items[1].starts_with("Thinking") && items[1].ends_with(" 2s"), "{items:?}");
+        assert!(items[2].contains("bash") && items[2].ends_with(" 3s"), "{items:?}");
     }
 
     #[test]

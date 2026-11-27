@@ -14,7 +14,7 @@ use agentlibre_proto::{
     Done, Event, Opened, Phase, PhaseEvent, PhaseTime, Report, Sent, StopReason, Told, Transition,
     TurnEnd,
 };
-use agentlibre_surface::records::{self, Fold, Record};
+use agentlibre_surface::records::{self, Fold, PhaseSpan, Record};
 use agentlibre_surface::speed::Window;
 use agentlibre_surface::words::{self, grouped};
 
@@ -106,7 +106,7 @@ struct Turn {
     /// When it began, from the human's message.
     started: Option<Instant>,
     /// Its phases and their times, in the order spent, summed by phase.
-    phases: Vec<(String, Duration)>,
+    phases: Vec<PhaseSpan>,
     /// Its reading and writing together, for the speed of its tokens.
     decoding: Duration,
     /// The tokens it decoded.
@@ -117,21 +117,7 @@ impl Turn {
     /// A turn of the past, whose phases the session's file keeps but
     /// nothing of its tokens (AGL-139, D6).
     fn of_past(turn: usize, transitions: &[PhaseTime], lang: Lang) -> Turn {
-        let mut phases: Vec<(String, Duration)> = Vec::new();
-        for line in transitions {
-            if line.turn != turn || line.from == "Ready" {
-                continue;
-            }
-            let tool = line.tool.clone().unwrap_or_default();
-            let Some(label) = records::phase_label(&line.from, &tool, lang) else {
-                continue;
-            };
-            match phases.iter_mut().find(|(name, _)| *name == label) {
-                Some((_, spent)) => *spent += Duration::from_millis(line.ms),
-                None => phases.push((label, Duration::from_millis(line.ms))),
-            }
-        }
-        Turn { phases, ..Turn::default() }
+        Turn { phases: records::turn_phases(turn, transitions, lang), ..Turn::default() }
     }
 
     /// The time of what was decoded in it.
@@ -144,11 +130,7 @@ impl Turn {
     /// their times, the time it took, its tokens and their speed. A turn of
     /// the past says only what its record keeps: the phases and their times.
     fn items(&self, lang: Lang) -> Vec<String> {
-        let mut items: Vec<String> = self
-            .phases
-            .iter()
-            .map(|(label, time)| format!("{label} {}", words::duration(time.as_secs())))
-            .collect();
+        let mut items = records::phase_items(&self.phases);
         if let Some(started) = self.started {
             let elapsed = started.elapsed();
             items.push(tr!(lang, m::WORKED_FOR, time = words::duration(elapsed.as_secs())).to_string());
@@ -249,16 +231,11 @@ impl Chat {
         self.dock.phase = Phase::Ready;
         self.dock.since = None;
         self.dock.pieces.clear();
-        let mut turn = 0;
         for event in events {
-            match event {
-                Event::User(_) | Event::Wake { .. } => turn += 1,
-                _ => {}
-            }
             fold.event(event);
             // A turn read from the past shows what its record keeps (D6).
             if matches!(event, Event::Answer(_)) {
-                let items = Turn::of_past(turn, transitions, self.lang).items(self.lang);
+                let items = Turn::of_past(fold.turn(), transitions, self.lang).items(self.lang);
                 if !items.is_empty() {
                     self.rows.insert(fold.records().len() - 1, items);
                 }
@@ -362,10 +339,7 @@ impl Chat {
             };
             if let Some(label) = records::phase_label(transition.from.name(), tool, lang) {
                 let time = Duration::from_micros(transition.micros);
-                match self.turn.phases.iter_mut().find(|(name, _)| *name == label) {
-                    Some((_, spent)) => *spent += time,
-                    None => self.turn.phases.push((label, time)),
-                }
+                records::add_phase(&mut self.turn.phases, label, time);
                 if matches!(transition.from, Phase::Thinking | Phase::Writing) {
                     self.turn.decoding += time;
                 }
