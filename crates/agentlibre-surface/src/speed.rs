@@ -22,15 +22,16 @@ impl Window {
         }
     }
 
-    /// Pieces per second: none while it holds fewer than two pieces or no
-    /// time passed between them.
+    /// Pieces per second: the spans between the pieces over their time,
+    /// none while it holds fewer than two pieces or no time passed between
+    /// them.
     pub fn speed(&self) -> Option<f64> {
         let (first, last) = (self.pieces.front()?, self.pieces.back()?);
         if self.pieces.len() < 2 {
             return None;
         }
         let span = last.duration_since(*first).as_secs_f64();
-        (span > 0.0).then(|| self.pieces.len() as f64 / span)
+        (span > 0.0).then(|| (self.pieces.len() - 1) as f64 / span)
     }
 
     /// The generation ended: its speed goes with it.
@@ -52,7 +53,8 @@ mod tests {
         window.piece(t0);
         assert_eq!(window.speed(), None);
         window.piece(t0 + Duration::from_millis(500));
-        assert!((window.speed().unwrap() - 4.0).abs() < 0.5);
+        // One span of half a second: two a second.
+        assert!((window.speed().unwrap() - 2.0).abs() < 0.01);
         window.clear();
         assert_eq!(window.speed(), None);
     }
@@ -64,7 +66,7 @@ mod tests {
         for ms in [0, 400, 1200] {
             window.piece(t0 + Duration::from_millis(ms));
         }
-        // The first is gone: two pieces over 0.8 s.
-        assert!((window.speed().unwrap() - 2.5).abs() < 0.01);
+        // The first is gone: one span over 0.8 s.
+        assert!((window.speed().unwrap() - 1.25).abs() < 0.01);
     }
 }
