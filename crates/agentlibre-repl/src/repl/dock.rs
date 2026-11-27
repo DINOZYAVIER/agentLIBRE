@@ -31,36 +31,6 @@ const DRAFT_ROWS: usize = 3;
 /// How many printed lines are remembered for erasing.
 const REMEMBERED_LINES: usize = 400;
 
-/// The context usage for the status row (D152): `41 213 / 131 072 (32%)`,
-/// with `—` before the first step. The text's own color at every share of
-/// the context: the number says how much is used, the color says nothing
-/// else (AGL-080, D3, yellow from 70% and orange from 90%, undone by
-/// AGL-084, D1).
-fn context_usage(used: Option<usize>, size: usize) -> String {
-    // The server has not answered yet (AGL-015).
-    if size == 0 {
-        return "—".into();
-    }
-    let Some(used) = used else {
-        return format!("— / {}", grouped(size));
-    };
-    let percent = used.saturating_mul(100) / size.max(1);
-    format!("{} / {} ({percent}%)", grouped(used), grouped(size))
-}
-
-/// `n` with a no-break space between groups of three digits.
-pub(super) fn grouped(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            out.push('\u{a0}');
-        }
-        out.push(digit);
-    }
-    out
-}
-
 /// How a dictation ends: sent by itself, or left in the line to ask
 /// (AGL-123, D1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -544,7 +514,7 @@ impl State {
 
     fn status_row(&self) -> String {
         let columns = self.columns;
-        let usage = context_usage(self.context_used, self.context);
+        let usage = texts::context_usage(self.context_used, self.context);
         // The usage is dropped when the row is too narrow for it.
         let usage = Some(usage).filter(|text| columns >= 3 * width(text));
         let usage_width = usage.as_ref().map_or(0, |text| width(text) + 2);
@@ -649,6 +619,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use agentlibre_surface::words::{context_usage, grouped};
     use crate::repl::editor::MenuItem;
 
     /// A writer whose bytes the test reads.

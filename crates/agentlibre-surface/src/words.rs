@@ -221,6 +221,34 @@ pub fn reasoning_level(level: Option<ReasoningLevel>, lang: Lang) -> String {
     }
 }
 
+/// `n` with a no-break space between groups of three digits, as the dock
+/// groups them.
+pub fn grouped(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push('\u{a0}');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// The context usage of the dock's row (D152; AGL-139, D1): `41 213 /
+/// 131 072 (32%)`, `— / size` before the first prompt, `—` while the
+/// server has not answered (a `size` of 0, AGL-015).
+pub fn context_usage(used: Option<usize>, size: usize) -> String {
+    if size == 0 {
+        return "\u{2014}".into();
+    }
+    let Some(used) = used else {
+        return format!("\u{2014} / {}", grouped(size));
+    };
+    let percent = used.saturating_mul(100) / size.max(1);
+    format!("{} / {} ({percent}%)", grouped(used), grouped(size))
+}
+
 /// Time as `5s`, `2m 3s` or `1h 4m`.
 pub fn duration(seconds: u64) -> String {
     match seconds {

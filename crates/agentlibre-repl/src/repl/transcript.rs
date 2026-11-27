@@ -2,17 +2,16 @@
 //! text restyled as Markdown, tool cards, answers and stops (D123-D127,
 //! D138). Drawing goes through [`Screen`].
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::card::{self, Fold, Render, block_lines, notice_block_lines, summary, user_lines};
-use super::dock::grouped;
 use super::reading::{MIN_TOKENS_OF_A_SPEED, Reading};
 use agentlibre_surface::records::{self, Record, ToolResult};
 use super::text::StreamWrap;
 use agentlibre_client::Surface;
-use agentlibre_surface::words as texts;
+use agentlibre_surface::speed::Window;
+use agentlibre_surface::words::{self as texts, grouped};
 use agentlibre_common::i18n::{Lang, m};
 use agentlibre_common::settings::{Detail, ReplSettings};
 use agentlibre_common::style::Role;
@@ -72,8 +71,8 @@ struct Streamed {
 
 /// A generation being decoded: its pieces for the live speed (AGL-012).
 struct Generation {
-    /// The times of its recent pieces, within the live window.
-    window: VecDeque<Instant>,
+    /// Its recent pieces, within the live window.
+    window: Window,
     /// When its first piece arrived.
     started: Instant,
 }
@@ -474,12 +473,11 @@ impl Presenter {
     fn piece(&mut self) {
         let now = Instant::now();
         let generation = self.generation.get_or_insert_with(|| Generation {
-            window: VecDeque::new(),
+            window: Window::default(),
             started: now,
         });
-        generation.window.push_back(now);
-        trim_window(&mut generation.window, now);
-        self.screen.speed(window_speed(&generation.window));
+        generation.window.piece(now);
+        self.screen.speed(generation.window.speed());
     }
 
     /// The generation being decoded is done: its time goes to the turn
@@ -786,32 +784,6 @@ impl Presenter {
     fn decoded(&mut self, tokens: usize) {
         self.turn_tokens += tokens;
     }
-}
-
-/// Keeps in `window` the pieces of the last second (AGL-012).
-fn trim_window(window: &mut VecDeque<Instant>, now: Instant) {
-    while window.len() > 1
-        && now
-            .duration_since(*window.front().expect("checked"))
-            .as_secs_f64()
-            > 1.0
-    {
-        window.pop_front();
-    }
-}
-
-/// The live speed of `window`: pieces per second, none while it holds
-/// fewer than two pieces or no time passed (AGL-012).
-fn window_speed(window: &VecDeque<Instant>) -> Option<f64> {
-    if window.len() < 2 {
-        return None;
-    }
-    let span = window
-        .back()
-        .expect("two or more")
-        .duration_since(*window.front().expect("two or more"))
-        .as_secs_f64();
-    (span > 0.0).then(|| window.len() as f64 / span)
 }
 
 /// The live block of a thinking longer than the room above the dock
@@ -1842,37 +1814,6 @@ mod tests {
         assert_eq!(printed[0], "Looking at it.");
         assert!(printed[1].starts_with("TOOL bash"), "{printed:?}");
         assert!(printed.contains(&"TOOL bash  OK".to_owned()));
-    }
-
-    #[test]
-    fn the_live_speed_needs_two_pieces_apart() {
-        let t0 = Instant::now();
-        assert_eq!(window_speed(&VecDeque::new()), None);
-        let one: VecDeque<Instant> = [t0].into_iter().collect();
-        assert_eq!(window_speed(&one), None);
-        let two: VecDeque<Instant> = [t0, t0 + Duration::from_millis(500)].into_iter().collect();
-        assert!((window_speed(&two).unwrap() - 4.0).abs() < 0.5);
-    }
-
-    #[test]
-    fn the_window_keeps_the_pieces_of_the_last_second() {
-        let t0 = Instant::now();
-        let mut window: VecDeque<Instant> = [
-            t0,
-            t0 + Duration::from_millis(400),
-            t0 + Duration::from_millis(1200),
-        ]
-        .into_iter()
-        .collect();
-        trim_window(&mut window, t0 + Duration::from_millis(1200));
-        assert_eq!(window.len(), 2);
-        assert_eq!(
-            window.front().copied(),
-            Some(t0 + Duration::from_millis(400))
-        );
-        let mut one: VecDeque<Instant> = [t0].into_iter().collect();
-        trim_window(&mut one, t0 + Duration::from_secs(5));
-        assert_eq!(one.len(), 1);
     }
 
     #[test]

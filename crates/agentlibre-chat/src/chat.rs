@@ -4,7 +4,7 @@
 //! the row under the field says — the Function, the context, the phase and
 //! the speed (AGL-139, D1) — and the row of phases under each answer (D6).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use agentlibre_common::i18n::{Lang, m};
@@ -15,7 +15,8 @@ use agentlibre_proto::{
     TurnEnd,
 };
 use agentlibre_surface::records::{self, Fold, Record};
-use agentlibre_surface::words;
+use agentlibre_surface::speed::Window;
+use agentlibre_surface::words::{self, grouped};
 
 /// What runs the session, for the row under the field (AGL-139, D1): as the
 /// REPL's dock, the Function, `used / size (pct)`, the phase with its time
@@ -32,9 +33,9 @@ pub struct Dock {
     pub phase: Phase,
     /// When the phase began: its time is what has gone since.
     since: Option<Instant>,
-    /// When the recent pieces of what is being decoded arrived, within the
-    /// second of the row's speed (D6), as the REPL's dock counts them.
-    pieces: VecDeque<Instant>,
+    /// The recent pieces of what is being decoded, within the second of
+    /// the row's speed (D6), as the REPL's dock counts them.
+    pieces: Window,
 }
 
 impl Default for Dock {
@@ -45,7 +46,7 @@ impl Default for Dock {
             used: None,
             phase: Phase::Ready,
             since: None,
-            pieces: VecDeque::new(),
+            pieces: Window::default(),
         }
     }
 }
@@ -73,52 +74,20 @@ impl Dock {
     /// while the server has not answered, `— / size` before the first
     /// prompt.
     pub fn usage(&self) -> String {
-        let Some(size) = self.context.filter(|size| *size > 0) else {
-            return "\u{2014}".into();
-        };
-        match self.used {
-            None => format!("\u{2014} / {}", grouped(size)),
-            Some(used) => {
-                let percent = used.saturating_mul(100) / size.max(1);
-                format!("{} / {} ({percent}%)", grouped(used), grouped(size))
-            }
-        }
+        words::context_usage(self.used, self.context.unwrap_or(0))
     }
 
     /// The speed of what is being decoded: the pieces of the last second per
     /// its span, none before two of them have come (AGL-139, D6).
     pub fn speed(&self) -> Option<f64> {
-        let (first, last) = (self.pieces.front()?, self.pieces.back()?);
-        if self.pieces.len() < 2 {
-            return None;
-        }
-        let span = last.duration_since(*first).as_secs_f64();
-        (span > 0.0).then(|| self.pieces.len() as f64 / span)
+        self.pieces.speed()
     }
 
     /// A piece of the thinking or of the text arrived: the row's speed
     /// counts it, keeping only the last second of them (AGL-139, D6).
     fn piece(&mut self) {
-        let now = Instant::now();
-        self.pieces.push_back(now);
-        while self.pieces.len() > 1 && now.duration_since(self.pieces[0]).as_secs_f64() > 1.0 {
-            self.pieces.pop_front();
-        }
+        self.pieces.piece(Instant::now());
     }
-}
-
-/// `n` with a no-break space between groups of three digits, as the REPL's
-/// dock groups them (AGL-139, D1).
-pub fn grouped(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (index, digit) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            out.push('\u{a0}');
-        }
-        out.push(digit);
-    }
-    out
 }
 
 /// The line that says the server answered and what its context is (AGL-139,

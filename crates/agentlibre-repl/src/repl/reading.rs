@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::dock::grouped;
+use agentlibre_surface::words::grouped;
 use agentlibre_proto::PromptProgress;
 use agentlibre_surface::words as texts;
 use agentlibre_common::i18n::Lang;

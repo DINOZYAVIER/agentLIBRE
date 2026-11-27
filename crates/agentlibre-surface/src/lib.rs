@@ -12,6 +12,7 @@ pub mod dictation;
 mod error;
 pub mod record;
 pub mod records;
+pub mod speed;
 pub mod words;
 
 pub use error::{Error, client_message};
